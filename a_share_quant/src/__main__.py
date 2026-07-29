@@ -105,11 +105,47 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_self_test(_args: argparse.Namespace) -> int:
+def _cmd_backtest(args: argparse.Namespace) -> int:
+    """阶段 9：端到端回测，输出 NAV csv。"""
+    from pathlib import Path
+    import pandas as pd
+    from src.data.cleaner import PROC_BARS, PROC_STOCK_BASIC, PROC_TRADE_CALENDAR
+    from src.backtest.engine import run_backtest
+
+    bars_p = PROC_BARS() if callable(PROC_BARS) else PROC_BARS
+    sb_p = PROC_STOCK_BASIC() if callable(PROC_STOCK_BASIC) else PROC_STOCK_BASIC
+    cal_p = PROC_TRADE_CALENDAR() if callable(PROC_TRADE_CALENDAR) else PROC_TRADE_CALENDAR
+
+    if not bars_p.exists():
+        print(f"bars not found: {bars_p}\n请先跑 make self-test 或 make clean-data", file=sys.stderr)
+        return 2
+    bars = pd.read_parquet(bars_p)
+    sb = pd.read_parquet(sb_p) if sb_p.exists() else pd.DataFrame()
+    cal = pd.read_parquet(cal_p) if cal_p.exists() else pd.DataFrame()
+
+    print(f"bars: {len(bars)} rows; stocks: {len(sb)}; cal: {len(cal)}")
+    result = run_backtest(bars, sb, cal, initial_cash=args.initial_cash)
+    nav = result["nav"]
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    nav.to_csv(out_path)
+    n_filled = sum(1 for o in result["orders"] if o.status == "FILLED")
+    n_rej = sum(1 for o in result["orders"] if o.status == "REJECTED")
+    n_rebal = sum(1 for log in result["daily_logs"] if log.is_rebalance)
+    print(f"rebalances: {n_rebal}; orders: {len(result['orders'])} (filled={n_filled}, rejected={n_rej})")
+    print(f"start NAV: {nav['nav'].iloc[0]:,.2f}; end NAV: {nav['nav'].iloc[-1]:,.2f}")
+    ret = (nav["nav"].iloc[-1] / nav["nav"].iloc[0] - 1) * 100
+    max_dd = ((nav["nav"] / nav["nav"].cummax()) - 1).min() * 100
+    print(f"return: {ret:.2f}%; max DD: {max_dd:.2f}%")
+    print(f"NAV written to: {out_path}")
+    return 0
+
+
+def _cmd_self_test(args: argparse.Namespace) -> int:
     """不联网：用 fixture 走完 downloader/cleaner 管道。
 
-    重要：使用 tmp 目录，不污染项目的 data/raw/ 和 data/processed/。
-    函数退出时恢复原始模块属性，避免污染后续测试。
+    默认写到 tmp 目录，不污染项目。
+    --keep-raw 时写到项目的 data/raw/ 和 data/processed/，方便后续 backtest。
     """
     import tempfile
     from pathlib import Path
@@ -117,7 +153,6 @@ def _cmd_self_test(_args: argparse.Namespace) -> int:
     from src.data.cleaner import run_all
     from tests.fixtures.bars_fixture import build_fixture
 
-    # 保存原值（防止污染其他测试 / 进程）
     saved = {
         "RAW_BARS_DIR": downloader.RAW_BARS_DIR,
         "RAW_STOCK_BASIC": downloader.RAW_STOCK_BASIC,
@@ -126,6 +161,31 @@ def _cmd_self_test(_args: argparse.Namespace) -> int:
     from src.data import cleaner
     saved["DATA_PROCESSED"] = cleaner.DATA_PROCESSED
 
+    if args.keep_raw:
+        # 用项目目录
+        raw = downloader.DATA_RAW
+        proc = cleaner.DATA_PROCESSED
+        raw.mkdir(parents=True, exist_ok=True)
+        (raw / "bars").mkdir(exist_ok=True)
+        proc.mkdir(parents=True, exist_ok=True)
+        downloader.RAW_BARS_DIR = raw / "bars"
+        downloader.RAW_STOCK_BASIC = raw / "stock_basic.parquet"
+        downloader.RAW_TRADE_CALENDAR = raw / "trade_calendar.parquet"
+        cleaner.DATA_PROCESSED = proc
+        try:
+            build_fixture()
+            out = run_all()
+            for k, v in out.items():
+                print(f"  {k}: {len(v)} rows")
+        finally:
+            for k, v in saved.items():
+                if k == "DATA_PROCESSED":
+                    cleaner.DATA_PROCESSED = v
+                else:
+                    setattr(downloader, k, v)
+        return 0
+
+    # 默认：tmp
     try:
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)
@@ -164,12 +224,19 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("clean", help="clean raw -> processed")
 
     # self-test
-    sub.add_parser("self-test", help="run the pipeline against local fixtures (no network)")
+    pst = sub.add_parser("self-test", help="run the pipeline against local fixtures (no network)")
+    pst.add_argument("--keep-raw", action="store_true",
+                     help="write to project's data/raw and data/processed (default: tmp)")
 
     # validate
     pv = sub.add_parser("validate", help="run data quality checks on processed/")
     pv.add_argument("--asof", required=True, help="as-of date YYYY-MM-DD")
     pv.add_argument("--report", default=None, help="override report path")
+
+    # backtest
+    pb = sub.add_parser("backtest", help="run backtest on processed/ data")
+    pb.add_argument("--initial-cash", type=float, default=1_000_000.0)
+    pb.add_argument("--out", default="results/nav.csv", help="output NAV csv path")
 
     return p
 
@@ -189,6 +256,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_self_test(args)
     if args.cmd == "validate":
         return _cmd_validate(args)
+    if args.cmd == "backtest":
+        return _cmd_backtest(args)
     parser.print_help()
     return 1
 

@@ -43,6 +43,13 @@ clean-data: venv
 self-test: venv
 	$(VENV)/bin/python -m src self-test
 
+backtest: venv
+	$(VENV)/bin/python -m src backtest --initial-cash 1000000 --out results/nav.csv
+
+validate: venv
+	@if [ -z "$(ASOF)" ]; then echo "usage: make validate ASOF=YYYY-MM-DD"; exit 1; fi
+	$(VENV)/bin/python -m src validate --asof $(ASOF)
+
 clean:
 	find . -type d -name "__pycache__" -prune -exec rm -rf {} +
 	find . -type d -name ".pytest_cache" -prune -exec rm -rf {} +
