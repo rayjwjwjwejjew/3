@@ -4,11 +4,11 @@ A 股月频量化系统（V1 完整闭环 + Streamlit Web App）
 
 ## 当前状态
 
-**V1 全部 14 阶段完成** + 性能优化（2.5x）+ 同花顺风格 Web App。
+**V1 全部 14 阶段完成** + 性能优化（2.5x）+ 同花顺风格 Web App（多页 + K 线 + 基准对比 + PNG 导出 + 真实数据接入）。
 
-- **145/145 测试通过**（含性能基线保护）
+- **152/152 测试通过**（含性能基线保护）
 - **真实规模回测**：500×500 → 2.7s · 800×800 → 9.3s
-- **Web App**：`streamlit run app.py` 启动同花顺风格交互面板
+- **Web App**：`streamlit run app.py` 启动同花顺风格 5 页交互面板
 
 ## 必读
 
@@ -48,23 +48,25 @@ make app            # 启动 Web App → 浏览器打开 http://localhost:8501
 - 真实规模（800×800 = 64万行）：9.3s
 - 性能基线测试保护（`tests/test_performance.py`）
 
-## Web App（同花顺风格）
+## Web App（同花顺风格，5 页）
 
 ```bash
 make app
 # 浏览器打开 http://localhost:8501
 ```
 
-**特性**：
-- 侧边栏：参数面板（lookback / skip / top_k / 调仓频率 / 资金 / 数据规模）
-- 顶部 4 个 KPI 大数字卡片（总收益 / 年化 / 回撤 / Sharpe）
-- Plotly 真实净值曲线（可缩放、悬停）
-- 关键指标 + 交易统计（两列）
-- 年度收益含柱状图
-- 调仓时间线
-- 风险信号（自动异常检测）
+**5 个页面**：
+- 📊 **概览**：4 个 KPI 大数字 + 净值曲线 vs 基准 + 风险信号 + 导出 PNG
+- 📋 **回测**：详细指标 + 交易统计 + 年度收益 + 调仓时间线 + 下载 CSV
+- 📊 **行情**：单只股票 **K 线**（红涨绿跌 + 成交量 + MA20）+ 导出 PNG
+- 🔬 **过拟合**：调仓频率 5/10/20 + lookback 110/120/130 + 成本 ×2 压力测试
+- 🏦 **实盘**：broker 状态 + emergency stop 入口（V1 手动模式）
 
-**A 股惯例**：红涨绿跌、▲/▼ Unicode 字符、HEAVY box 标题、ROUNDED 区块。
+**数据源**：
+- 默认：合成数据（不联网）
+- 真实：`data/processed/bars.parquet` 存在时自动用真实 baostock 数据（需先 `make self-test --keep-raw` 或本机 `make download`）
+
+**A 股惯例**：红涨绿跌、▲/▼ Unicode、HEAVY box 标题、ROUNDED 区块、暗色渐变 KPI 卡片。
 
 ## CLI
 

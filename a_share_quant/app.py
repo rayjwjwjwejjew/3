@@ -1,21 +1,23 @@
-"""A-Share Quant V1 Web App（Streamlit，同花顺风格）。
+"""A-Share Quant V1 Web App（Streamlit 多页，同花顺风格）。
 
 启动：
     streamlit run app.py
 
-然后浏览器打开 http://localhost:8501
+浏览器打开 http://localhost:8501
+
+5 个页面：
+1. 概览：KPI 卡片 + 净值曲线 + 风险信号
+2. 回测：详细指标 + 年度收益 + 调仓时间线 + 导出 PNG
+3. 行情：单只股票 K 线 + 成交量 + MA20
+4. 过拟合：多策略对比
+5. 实盘：broker 状态 + emergency stop
 
 设计要素（参考同花顺客户端）：
-- 侧边栏：参数面板（lookback / skip / top_k / 调仓频率 / 初始资金 / 数据规模）
-- 顶部：4 个大数字 KPI（总收益 / 年化 / 最大回撤 / Sharpe）+ 端值 + 区间
-- 主区：
-  1. 净值曲线（Plotly 真实图表，可缩放）
-  2. 关键指标 + 交易统计（两列）
-  3. 年度收益（带柱状）
-  4. 调仓时间线
-  5. 风险信号（异常检测）
-
-A 股惯例：红涨绿跌。
+- 暗色主题 + 红涨绿跌（A 股惯例）
+- 顶部 KPI 大数字 + ▲/▼ 箭头
+- Plotly 真实图表（可缩放、悬停）
+- 自动异常检测
+- 优先真实数据，回退合成数据
 """
 
 from __future__ import annotations
@@ -27,19 +29,9 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-# 确保项目根在 path（streamlit run 时的 cwd 不一定是项目根）
 PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from src.factors.momentum import clear_momentum_cache
-from src.backtest.engine import run_backtest
-from src.reports.performance import build_report, PerformanceReport
-from src.data.schema import (
-    COL_ADJ_CLOSE, COL_ADJ_FACTOR, COL_AMOUNT, COL_CODE, COL_DATE,
-    COL_LIMIT_DOWN, COL_LIMIT_UP, COL_LOW, COL_OPEN, COL_HIGH, COL_CLOSE,
-    COL_VOL, COL_SUSPENDED, COL_ST,
-)
 
 
 # ===== 页面配置 =====
@@ -54,12 +46,9 @@ st.set_page_config(
 # ===== 同花顺风格 CSS =====
 st.markdown("""
 <style>
-/* 红涨绿跌（A 股惯例） */
 .pos { color: #ef4444; font-weight: 600; }
 .neg { color: #10b981; font-weight: 600; }
 .neu { color: #9ca3af; }
-
-/* 顶部 KPI 大数字 */
 .kpi-card {
     background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
     padding: 20px 24px;
@@ -74,25 +63,8 @@ st.markdown("""
     letter-spacing: 1px;
     margin-bottom: 8px;
 }
-.kpi-value {
-    color: #f8fafc;
-    font-size: 32px;
-    font-weight: 700;
-    line-height: 1.2;
-}
-.kpi-sub {
-    color: #64748b;
-    font-size: 13px;
-    margin-top: 6px;
-}
-
-/* 表格美化 */
-.stDataFrame {
-    border-radius: 8px;
-    overflow: hidden;
-}
-
-/* section 标题 */
+.kpi-value { color: #f8fafc; font-size: 32px; font-weight: 700; line-height: 1.2; }
+.kpi-sub { color: #64748b; font-size: 13px; margin-top: 6px; }
 .section-title {
     color: #1e293b;
     font-size: 18px;
@@ -105,7 +77,21 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# ===== 数据生成（合成 / 或加载 processed） =====
+# ===== 数据层 =====
+from src.factors.momentum import clear_momentum_cache
+from src.backtest.engine import run_backtest
+from src.reports.performance import build_report, PerformanceReport
+from src.data.schema import (
+    COL_ADJ_CLOSE, COL_ADJ_FACTOR, COL_AMOUNT, COL_CODE, COL_DATE,
+    COL_LIMIT_DOWN, COL_LIMIT_UP, COL_LOW, COL_OPEN, COL_HIGH, COL_CLOSE,
+    COL_VOL, COL_SUSPENDED, COL_ST,
+)
+from src.data.benchmark.benchmarks import make_equal_weight_benchmark, excess_return
+from src.webapp.data_loader import has_real_data, sample_real_data
+from src.webapp.charts import nav_chart, kline_chart, benchmark_bar, yearly_bar_compare, export_to_png
+
+
+# ===== 数据生成 =====
 @st.cache_data(show_spinner="合成数据中…")
 def make_synthetic_bars(n_stocks: int, n_days: int, seed: int = 2026) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
@@ -165,132 +151,158 @@ def _kpi_card(label: str, value: str, sub: str = "", color_class: str = "neu") -
 """
 
 
-# ===== 回测执行（带缓存） =====
+# ===== 回测入口（带缓存）=====
 @st.cache_data(show_spinner="回测运行中…")
 def run_backtest_cached(
-    n_stocks: int,
-    n_days: int,
-    initial_cash: float,
-    rebalance_every: int,
-    lookback: int,
-    skip: int,
-    top_k: int,
-    seed: int,
+    n_stocks: int, n_days: int, initial_cash: float,
+    rebalance_every: int, lookback: int, skip: int, top_k: int,
+    seed: int, use_real: bool,
 ) -> dict:
-    """统一的回测入口。streamlit 缓存保证同参数不重跑。"""
     clear_momentum_cache()
-    bars = make_synthetic_bars(n_stocks, n_days, seed=seed)
+    if use_real:
+        bars = sample_real_data(n_stocks, n_days, seed=seed)
+        if bars is None:
+            bars = make_synthetic_bars(n_stocks, n_days, seed=seed)
+    else:
+        bars = make_synthetic_bars(n_stocks, n_days, seed=seed)
     codes = list(bars[COL_CODE].unique())
     sb = make_stock_basic(codes)
     cal = make_calendar(bars[COL_DATE].unique())
     return run_backtest(
-        bars, sb, cal,
-        initial_cash=initial_cash,
-        rebalance_every=rebalance_every,
-        lookback=lookback, skip=skip, top_k=top_k,
+        bars, sb, cal, initial_cash=initial_cash,
+        rebalance_every=rebalance_every, lookback=lookback,
+        skip=skip, top_k=top_k,
     )
 
 
-# ===== 主区 =====
-def render_header(rep: PerformanceReport):
-    """顶部 4 个 KPI + 端值。"""
-    st.markdown('<div class="section-title">📊 概览</div>', unsafe_allow_html=True)
-    col1, col2, col3, col4 = st.columns(4)
+# ===== 侧边栏 =====
+def render_sidebar():
+    with st.sidebar:
+        st.markdown("## ⚙️ 参数设置")
+        st.markdown("---")
 
-    color_total = _color_ret(rep.total_return)
-    color_ann = _color_ret(rep.annualized_return)
-    color_dd = _color_ret(rep.max_drawdown)
-    color_sh = _color_ret(rep.sharpe)
+        use_real = st.checkbox(
+            "📊 使用真实数据（data/processed/bars.parquet）",
+            value=False,
+            help="需先 `make self-test --keep-raw` 或 `make clean-data` 落数据",
+            disabled=not has_real_data(),
+        )
+        if not has_real_data():
+            st.caption("⚠️ 暂无真实数据，使用合成数据")
 
-    with col1:
-        st.markdown(_kpi_card(
-            "总收益率",
+        st.markdown("---")
+        st.markdown("**数据规模**")
+        n_stocks = st.slider("股票数", 50, 2000, 200, step=50)
+        n_days = st.slider("交易日数", 100, 1500, 500, step=50)
+        seed = st.number_input("随机种子", value=2026, step=1)
+
+        st.markdown("---")
+        st.markdown("**策略参数**")
+        lookback = st.slider("动量回看", 60, 250, 120, step=10)
+        skip = st.slider("动量跳过", 0, 30, 5, step=1)
+        top_k = st.slider("持仓数量", 5, 30, 10, step=1)
+        rebalance_every = st.slider("调仓频率（每 N 日）", 5, 60, 20, step=5)
+
+        st.markdown("---")
+        st.markdown("**资金**")
+        initial_cash = st.number_input("初始资金 (¥)", value=1_000_000, step=100_000, format="%d")
+
+        st.markdown("---")
+        st.caption("💡 合成数据**不代表**真实 A 股表现")
+
+        return {
+            "n_stocks": n_stocks, "n_days": n_days, "seed": seed,
+            "lookback": lookback, "skip": skip, "top_k": top_k,
+            "rebalance_every": rebalance_every, "initial_cash": initial_cash,
+            "use_real": use_real,
+        }
+
+
+# ===== 共用：渲染 KPI 卡片 =====
+def render_kpi_cards(rep: PerformanceReport):
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.markdown(_kpi_card("总收益率",
             f"{_arrow(rep.total_return)} {_fmt_pct(rep.total_return)}",
             f"初始 ¥{rep.initial_cash:,.0f} → 终值 ¥{rep.final_nav:,.0f}",
-            color_total,
-        ), unsafe_allow_html=True)
-    with col2:
-        st.markdown(_kpi_card(
-            "年化收益",
-            _fmt_pct(rep.annualized_return),
-            f"波动率 {_fmt_pct(rep.annualized_vol)}",
-            color_ann,
-        ), unsafe_allow_html=True)
-    with col3:
-        st.markdown(_kpi_card(
-            "最大回撤",
+            _color_ret(rep.total_return)), unsafe_allow_html=True)
+    with c2:
+        st.markdown(_kpi_card("年化收益", _fmt_pct(rep.annualized_return),
+            f"波动率 {_fmt_pct(rep.annualized_vol)}", _color_ret(rep.annualized_return)),
+            unsafe_allow_html=True)
+    with c3:
+        rec = f"{rep.max_dd_recovery_days} 天" if rep.max_dd_recovery_days is not None else "未修复"
+        st.markdown(_kpi_card("最大回撤",
             f"{_arrow(rep.max_drawdown)} {_fmt_pct(rep.max_drawdown)}",
-            f"修复 {rep.max_dd_recovery_days or '未修复'} 天" if rep.max_dd_recovery_days is not None else f"修复 [未修复]",
-            color_dd,
-        ), unsafe_allow_html=True)
-    with col4:
-        st.markdown(_kpi_card(
-            "夏普比率",
-            f"{rep.sharpe:+.2f}",
+            f"修复 {rec}", _color_ret(rep.max_drawdown)), unsafe_allow_html=True)
+    with c4:
+        st.markdown(_kpi_card("夏普比率", f"{rep.sharpe:+.2f}",
             f"换手率 {_fmt_pct(rep.annualized_turnover, 1)}（年化）",
-            color_sh,
-        ), unsafe_allow_html=True)
+            _color_ret(rep.sharpe)), unsafe_allow_html=True)
 
 
-def render_nav_chart(nav: pd.DataFrame, rep: PerformanceReport):
-    """净值曲线（Plotly）。"""
-    import plotly.graph_objects as go
+# ===== 共用：风险信号 =====
+def render_risk_signals(rep: PerformanceReport):
+    st.markdown('<div class="section-title">⚠️ 风险信号</div>', unsafe_allow_html=True)
+    signals = []
+    if rep.max_drawdown < -0.20:
+        signals.append(("🔴", f"最大回撤 {_fmt_pct(rep.max_drawdown)} 过大", "error"))
+    elif rep.max_drawdown < -0.10:
+        signals.append(("🟡", f"最大回撤 {_fmt_pct(rep.max_drawdown)} 中等", "warning"))
+    if rep.sharpe < 0:
+        signals.append(("🔴", f"夏普 {rep.sharpe:.2f} 为负，未跑赢现金", "error"))
+    elif rep.sharpe < 0.5:
+        signals.append(("🟡", f"夏普 {rep.sharpe:.2f} 偏低", "warning"))
+    if rep.cost_ratio > 0.30:
+        signals.append(("🟡", f"成本/收益 {_fmt_pct(rep.cost_ratio, 1)} 较高", "warning"))
+    if rep.longest_losing_streak_months >= 6:
+        signals.append(("🟡", f"最长连续亏损 {rep.longest_losing_streak_months} 月", "warning"))
+    if rep.max_dd_recovery_days is None:
+        signals.append(("🟡", "回撤至今未修复", "warning"))
+    if not signals:
+        signals.append(("🟢", "所有指标在合理范围内", "ok"))
+    for icon, msg, level in signals:
+        if level == "error":
+            st.error(f"{icon} {msg}")
+        elif level == "warning":
+            st.warning(f"{icon} {msg}")
+        else:
+            st.success(f"{icon} {msg}")
 
-    st.markdown('<div class="section-title">📈 净值曲线</div>', unsafe_allow_html=True)
 
-    if nav.empty or "nav" not in nav.columns:
-        st.warning("无净值数据")
-        return
+# ===== 页面 1: 概览 =====
+def page_overview(params, result, nav, rep):
+    st.title("📊 概览")
+    render_kpi_cards(rep)
 
-    s = nav["nav"]
-    # 红涨绿跌配色
-    color = "#ef4444" if s.iloc[-1] >= s.iloc[0] else "#10b981"
-    fill_color = "rgba(239, 68, 68, 0.1)" if s.iloc[-1] >= s.iloc[0] else "rgba(16, 185, 129, 0.1)"
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=s.index, y=s.values,
-        mode="lines",
-        line=dict(color=color, width=2),
-        fill="tozeroy",
-        fillcolor=fill_color,
-        name="NAV",
-        hovertemplate="<b>%{x|%Y-%m-%d}</b><br>NAV: ¥%{y:,.0f}<extra></extra>",
-    ))
-    # 基准线：初始资金
-    fig.add_hline(
-        y=rep.initial_cash,
-        line=dict(color="#94a3b8", width=1, dash="dash"),
-        annotation_text=f"初始 ¥{rep.initial_cash:,.0f}",
-        annotation_position="right",
-    )
-    fig.update_layout(
-        height=400,
-        margin=dict(l=0, r=0, t=20, b=0),
-        xaxis_title="",
-        yaxis_title="净值 (¥)",
-        hovermode="x unified",
-        template="plotly_dark",
-        paper_bgcolor="#0f172a",
-        plot_bgcolor="#0f172a",
-    )
+    # 净值曲线（含基准对比）
+    benchmark = make_equal_weight_benchmark(result["bars"] if "bars" in result else None,
+                                          initial_cash=params["initial_cash"])
+    st.markdown('<div class="section-title">📈 净值曲线 vs 基准</div>', unsafe_allow_html=True)
+    fig = nav_chart(nav, benchmark, title="")
     st.plotly_chart(fig, use_container_width=True)
 
-    # 区间高低
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.metric("区间高", f"¥{s.max():,.0f}", _fmt_pct(s.max() / s.iloc[0] - 1))
-    with c2:
-        st.metric("区间低", f"¥{s.min():,.0f}", _fmt_pct(s.min() / s.iloc[0] - 1))
-    with c3:
-        st.metric("区间", f"{(s.index[-1] - s.index[0]).days} 天", "")
+    # 导出 PNG
+    col1, col2 = st.columns([1, 9])
+    with col1:
+        if st.button("💾 导出 PNG"):
+            path = PROJECT_ROOT / "results" / f"nav_chart_{params['seed']}.png"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if export_to_png(fig, path):
+                st.success(f"已保存 {path.name}")
+            else:
+                st.error("导出失败（kaleido 缺失？）")
+
+    render_risk_signals(rep)
 
 
-def render_metrics(rep: PerformanceReport, daily_logs: list | None):
-    """关键指标 + 交易统计。"""
-    st.markdown('<div class="section-title">📋 详细指标</div>', unsafe_allow_html=True)
+# ===== 页面 2: 回测 =====
+def page_backtest(params, result, nav, rep, daily_logs):
+    st.title("📋 详细回测")
+
+    # 详细指标 + 交易统计
+    st.markdown('<div class="section-title">详细指标 + 交易统计</div>', unsafe_allow_html=True)
     col1, col2 = st.columns(2)
-
     with col1:
         st.markdown("**关键指标**")
         data = {
@@ -306,11 +318,7 @@ def render_metrics(rep: PerformanceReport, daily_logs: list | None):
                 f"{rep.longest_losing_streak_months} 月",
             ],
         }
-        st.markdown(
-            pd.DataFrame(data).to_html(escape=False, index=False),
-            unsafe_allow_html=True,
-        )
-
+        st.markdown(pd.DataFrame(data).to_html(escape=False, index=False), unsafe_allow_html=True)
     with col2:
         st.markdown("**交易统计**")
         status_dist = rep.order_status_distribution or {}
@@ -325,170 +333,239 @@ def render_metrics(rep: PerformanceReport, daily_logs: list | None):
                 _fmt_pct(rep.annualized_turnover, 1),
             ],
         }
-        st.markdown(
-            pd.DataFrame(data2).to_html(escape=False, index=False),
-            unsafe_allow_html=True,
-        )
+        st.markdown(pd.DataFrame(data2).to_html(escape=False, index=False), unsafe_allow_html=True)
 
-
-def render_yearly(rep: PerformanceReport):
-    """年度收益（含柱状图）。"""
+    # 年度收益（含柱状图）
     st.markdown('<div class="section-title">📅 年度收益</div>', unsafe_allow_html=True)
-    if rep.yearly_returns.empty:
-        st.warning("无年度收益数据")
-        return
+    if not rep.yearly_returns.empty:
+        rows = []
+        for y, r in rep.yearly_returns.items():
+            y_str = y.strftime("%Y") if hasattr(y, "strftime") else str(y)
+            if pd.isna(r):
+                rows.append({"年份": y_str, "收益": "—", "柱状": ""})
+                continue
+            bar_len = max(1, int(abs(r) * 30))
+            bar = "█" * bar_len
+            rows.append({
+                "年份": y_str,
+                "收益": f"<span class='{_color_ret(r)}'><b>{_fmt_pct(r)}</b></span>",
+                "柱状": f"<span class='{_color_ret(r)}' style='font-family: monospace'>{bar}</span>",
+            })
+        st.markdown(pd.DataFrame(rows).to_html(escape=False, index=False), unsafe_allow_html=True)
 
-    import plotly.graph_objects as go
+    # 调仓时间线
+    st.markdown('<div class="section-title">🔄 调仓时间线</div>', unsafe_allow_html=True)
+    rebal_logs = [log for log in (daily_logs or []) if getattr(log, "is_rebalance", False)]
+    if rebal_logs:
+        rows = []
+        for log in rebal_logs[:30]:
+            d = log.date
+            if d in nav.index and len(nav) > 0:
+                idx = nav.index.get_loc(d)
+                if idx > 0:
+                    prev = float(nav["nav"].iloc[idx - 1])
+                    cur = float(nav["nav"].iloc[idx])
+                    daily_ret = (cur / prev) - 1 if prev > 0 else 0.0
+                    rows.append({
+                        "调仓日": d.strftime("%Y-%m-%d"),
+                        "当日收益": f"<span class='{_color_ret(daily_ret)}'>{_arrow(daily_ret)} {_fmt_pct(daily_ret, 1)}</span>",
+                        "当日 NAV": f"¥{cur:,.0f}",
+                        "持仓数": log.n_holdings,
+                    })
+        if rows:
+            st.markdown(pd.DataFrame(rows).to_html(escape=False, index=False), unsafe_allow_html=True)
+    else:
+        st.info("无调仓事件（参数下调整仓频率）")
 
-    rows = []
-    for y, r in rep.yearly_returns.items():
-        y_str = y.strftime("%Y") if hasattr(y, "strftime") else str(y)
-        if pd.isna(r):
-            rows.append({"年份": y_str, "收益": "—", "柱状": ""})
-            continue
-        color = "ef4444" if r > 0 else "10b981"
-        bar_len = max(1, int(abs(r) * 30))  # 1% = 3 块
-        bar = "█" * bar_len
-        rows.append({
-            "年份": y_str,
-            "收益": f"<span class='{_color_ret(r)}'><b>{_fmt_pct(r)}</b></span>",
-            "柱状": f"<span class='{_color_ret(r)}' style='font-family: monospace'>{bar}</span>",
-        })
-    st.markdown(
-        pd.DataFrame(rows).to_html(escape=False, index=False),
-        unsafe_allow_html=True,
+    # 导出
+    st.markdown("---")
+    st.download_button(
+        "💾 下载 NAV.csv",
+        data=nav.to_csv().encode("utf-8"),
+        file_name="nav.csv",
+        mime="text/csv",
     )
 
 
-def render_rebalance_timeline(nav: pd.DataFrame, daily_logs: list | None):
-    """调仓时间线。"""
-    st.markdown('<div class="section-title">🔄 调仓时间线</div>', unsafe_allow_html=True)
-    rebal_logs = [log for log in (daily_logs or []) if getattr(log, "is_rebalance", False)]
-    if not rebal_logs:
-        st.info("无调仓事件（参数下调整仓频率）")
+# ===== 页面 3: 行情（K 线）=====
+def page_market(bars: pd.DataFrame):
+    st.title("📊 个股行情")
+    if bars is None or bars.empty:
+        st.warning("无数据")
         return
 
-    rows = []
-    for log in rebal_logs[:30]:  # 最多 30 行
-        d = log.date
-        if d in nav.index and len(nav) > 0:
-            idx = nav.index.get_loc(d)
-            if idx > 0:
-                prev = float(nav["nav"].iloc[idx - 1])
-                cur = float(nav["nav"].iloc[idx])
-                daily_ret = (cur / prev) - 1 if prev > 0 else 0.0
-                rows.append({
-                    "调仓日": d.strftime("%Y-%m-%d"),
-                    "当日收益": f"<span class='{_color_ret(daily_ret)}'>{_arrow(daily_ret)} {_fmt_pct(daily_ret, 1)}</span>",
-                    "当日 NAV": f"¥{cur:,.0f}",
-                    "持仓数": log.n_holdings,
-                })
-    if rows:
-        st.markdown(
-            pd.DataFrame(rows).to_html(escape=False, index=False),
-            unsafe_allow_html=True,
-        )
+    codes = sorted(bars[COL_CODE].unique().tolist())
+    code = st.selectbox("选择股票", codes, index=0)
+    n_bars = st.slider("显示最近 N 个交易日", 60, 500, 200, step=20)
+    recent = bars.sort_values(COL_DATE).tail(n_bars * 50)  # 留 buffer
 
+    fig = kline_chart(recent, code)
+    st.plotly_chart(fig, use_container_width=True)
 
-def render_risk_signals(rep: PerformanceReport):
-    """风险信号（同花顺式自动异常检测）。"""
-    st.markdown('<div class="section-title">⚠️ 风险信号</div>', unsafe_allow_html=True)
-    signals = []
-
-    if rep.max_drawdown < -0.20:
-        signals.append(("🔴", f"最大回撤 {rep.sharpe:.2%} 过大，建议检查策略", "error"))
-    elif rep.max_drawdown < -0.10:
-        signals.append(("🟡", f"最大回撤 {_fmt_pct(rep.max_drawdown)} 中等", "warning"))
-
-    if rep.sharpe < 0:
-        signals.append(("🔴", f"夏普比率 {rep.sharpe:.2f} 为负，策略未跑赢现金", "error"))
-    elif rep.sharpe < 0.5:
-        signals.append(("🟡", f"夏普比率 {rep.sharpe:.2f} 偏低", "warning"))
-
-    if rep.cost_ratio > 0.30:
-        signals.append(("🟡", f"成本/收益 {_fmt_pct(rep.cost_ratio, 1)} 较高", "warning"))
-
-    if rep.longest_losing_streak_months >= 6:
-        signals.append(("🟡", f"最长连续亏损 {rep.longest_losing_streak_months} 月，心理压力测试", "warning"))
-
-    if rep.max_dd_recovery_days is None:
-        signals.append(("🟡", "回撤至今未修复（仍在回撤中）", "warning"))
-
-    if not signals:
-        signals.append(("🟢", "所有指标在合理范围内", "ok"))
-
-    for icon, msg, level in signals:
-        if level == "error":
-            st.error(f"{icon} {msg}")
-        elif level == "warning":
-            st.warning(f"{icon} {msg}")
+    # 导出 K 线 PNG
+    if st.button("💾 导出 K 线 PNG"):
+        path = PROJECT_ROOT / "results" / f"kline_{code}.png"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if export_to_png(fig, path):
+            st.success(f"已保存 {path.name}")
         else:
-            st.success(f"{icon} {msg}")
+            st.error("导出失败")
 
 
-# ===== 侧边栏 =====
-def render_sidebar():
-    with st.sidebar:
-        st.markdown("## ⚙️ 参数设置")
-        st.markdown("---")
+# ===== 页面 4: 过拟合 =====
+def page_overfit(params):
+    st.title("🔬 过拟合 / 稳健性")
+    st.caption("比较调仓频率 5/10/20、lookback 110/120/130、成本 ×2")
 
-        st.markdown("**数据规模**（合成数据）")
-        n_stocks = st.slider("股票数", 50, 2000, 200, step=50)
-        n_days = st.slider("交易日数", 100, 1500, 500, step=50)
-        seed = st.number_input("随机种子", value=2026, step=1)
+    n_stocks = min(params["n_stocks"], 300)  # 限规模避免太慢
+    n_days = min(params["n_days"], 500)
 
-        st.markdown("---")
-        st.markdown("**策略参数**")
-        lookback = st.slider("动量回看 (lookback)", 60, 250, 120, step=10)
-        skip = st.slider("动量跳过 (skip)", 0, 30, 5, step=1)
-        top_k = st.slider("持仓数量 (top_k)", 5, 30, 10, step=1)
-        rebalance_every = st.slider("调仓频率（每 N 个交易日）", 5, 60, 20, step=5)
+    # 调仓频率对比
+    st.markdown('<div class="section-title">调仓频率对比</div>', unsafe_allow_html=True)
+    rows = []
+    for f in (5, 10, 20):
+        try:
+            r = run_backtest_cached(n_stocks, n_days, params["initial_cash"],
+                                     f, params["lookback"], params["skip"], params["top_k"],
+                                     params["seed"], params["use_real"])
+            rep = build_report(r["nav"], r["orders"], r.get("daily_logs"))
+            rows.append({
+                "调仓频率": f"每 {f} 日",
+                "总收益": f"<span class='{_color_ret(rep.total_return)}'>{_fmt_pct(rep.total_return)}</span>",
+                "夏普": f"{rep.sharpe:+.2f}",
+                "最大回撤": f"<span class='{_color_ret(rep.max_drawdown)}'>{_fmt_pct(rep.max_drawdown)}</span>",
+                "成交": rep.filled_trades,
+            })
+        except Exception as e:
+            rows.append({"调仓频率": f"每 {f} 日", "总收益": "—", "夏普": "—", "最大回撤": "—", "成交": str(e)[:20]})
+    st.markdown(pd.DataFrame(rows).to_html(escape=False, index=False), unsafe_allow_html=True)
 
-        st.markdown("---")
-        st.markdown("**资金**")
-        initial_cash = st.number_input("初始资金 (¥)", value=1_000_000, step=100_000, format="%d")
+    # lookback 敏感性
+    st.markdown('<div class="section-title">lookback 敏感性</div>', unsafe_allow_html=True)
+    rows = []
+    for lb in (110, 120, 130):
+        try:
+            r = run_backtest_cached(n_stocks, n_days, params["initial_cash"],
+                                     params["rebalance_every"], lb, params["skip"], params["top_k"],
+                                     params["seed"], params["use_real"])
+            rep = build_report(r["nav"], r["orders"], r.get("daily_logs"))
+            rows.append({
+                "lookback": lb,
+                "总收益": f"<span class='{_color_ret(rep.total_return)}'>{_fmt_pct(rep.total_return)}</span>",
+                "夏普": f"{rep.sharpe:+.2f}",
+                "最大回撤": f"<span class='{_color_ret(rep.max_drawdown)}'>{_fmt_pct(rep.max_drawdown)}</span>",
+            })
+        except Exception:
+            rows.append({"lookback": lb, "总收益": "—", "夏普": "—", "最大回撤": "—"})
+    st.markdown(pd.DataFrame(rows).to_html(escape=False, index=False), unsafe_allow_html=True)
 
-        st.markdown("---")
-        st.markdown("💡 **提示**：所有合成数据随机生成，**不代表真实 A 股表现**。")
-        st.markdown("V1 阶段仅用作系统连通性验证。")
+    # 成本 ×2 压力测试
+    st.markdown('<div class="section-title">成本 ×2 压力测试</div>', unsafe_allow_html=True)
+    rows = []
+    for m, label in [(1.0, "正常"), (2.0, "×2")]:
+        try:
+            clear_momentum_cache()
+            bars = make_synthetic_bars(n_stocks, n_days, seed=params["seed"])
+            sb = make_stock_basic(list(bars[COL_CODE].unique()))
+            cal = make_calendar(bars[COL_DATE].unique())
+            r = run_backtest(bars, sb, cal, initial_cash=params["initial_cash"],
+                            cost_multiplier=m)
+            rep = build_report(r["nav"], r["orders"], r.get("daily_logs"))
+            rows.append({
+                "成本": label,
+                "总收益": f"<span class='{_color_ret(rep.total_return)}'>{_fmt_pct(rep.total_return)}</span>",
+                "总成本": f"¥{rep.total_costs:,.0f}",
+                "成本/收益": _fmt_pct(rep.cost_ratio, 2),
+            })
+        except Exception:
+            rows.append({"成本": label, "总收益": "—", "总成本": "—", "成本/收益": "—"})
+    st.markdown(pd.DataFrame(rows).to_html(escape=False, index=False), unsafe_allow_html=True)
 
-        return {
-            "n_stocks": n_stocks, "n_days": n_days, "seed": seed,
-            "lookback": lookback, "skip": skip, "top_k": top_k,
-            "rebalance_every": rebalance_every, "initial_cash": initial_cash,
-        }
+
+# ===== 页面 5: 实盘 =====
+def page_broker():
+    st.title("🏦 实盘（V1 手动模式）")
+    st.warning("⚠️ V1 阶段**不连接任何真实券商**。本页面仅展示 broker 框架状态。")
+
+    from src.broker import is_emergency_stopped
+    from src.risk.controls import TRADING_ENABLED
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("TRADING_ENABLED", "✅ True" if TRADING_ENABLED else "🔴 False",
+                  delta="正常运行" if TRADING_ENABLED else "已停止")
+    with col2:
+        st.metric("Emergency Stop", "🚨 已触发" if is_emergency_stopped() else "🟢 未触发")
+    with col3:
+        st.metric("Broker 层", "V1 手动模式", "不连接券商")
+
+    st.markdown("---")
+    st.markdown("**紧急停止（CLI）**")
+    st.code("python -m src broker --action emergency-stop", language="bash")
+    st.code("python -m src broker --action clear-stop", language="bash")
+    st.code("python -m src broker --action status", language="bash")
+
+    st.markdown("**前置条件（spec §14）**")
+    st.markdown("""
+- ✅ V2 阶段过拟合测试通过
+- ✅ V3 阶段模拟盘稳定运行 ≥ 30 个交易日
+- ✅ 已向开户券商完成程序化交易报告
+- ✅ API 密钥通过环境变量（**禁止写入 Git**）
+- ✅ 已阅读 `src/broker/README.md`
+    """)
+
+    st.markdown("**接入新券商的标准流程**")
+    st.markdown("""
+1. 实现 `BrokerAdapter` 子类（`get_account` / `submit_order` / `cancel_order` / `is_connected`）
+2. 添加进 `src/broker/<券商名>.py`
+3. CLI 加 `--broker <券商名>` 参数
+4. 小规模（建议首笔 ≤ 1w 元）测试
+5. 通过 `emergency_stop` 测试：手动触发后能正确停止
+    """)
 
 
 # ===== 主入口 =====
 def main():
     st.title("📈 A-Share Quant V1")
-    st.caption("同花顺风格回测面板 · V1 演示 · 数据为合成随机序列")
+    st.caption("同花顺风格回测面板 · V1 演示")
 
+    # 侧边栏
     params = render_sidebar()
 
-    try:
-        result = run_backtest_cached(**params)
-    except Exception as e:
-        st.error(f"回测失败：{e}")
-        return
+    # 页面路由（st.tabs vs st.radio）
+    page = st.sidebar.radio("📑 页面", [
+        "📊 概览", "📋 回测", "📊 行情", "🔬 过拟合", "🏦 实盘",
+    ], index=0)
 
-    nav = result["nav"]
-    daily_logs = result.get("daily_logs", [])
-    rep = build_report(nav, result["orders"], daily_logs)
+    # 概览/回测/过拟合需要回测结果
+    if page in ("📊 概览", "📋 回测", "🔬 过拟合"):
+        try:
+            result = run_backtest_cached(**params)
+        except Exception as e:
+            st.error(f"回测失败：{e}")
+            return
+        nav = result["nav"]
+        daily_logs = result.get("daily_logs", [])
+        rep = build_report(nav, result["orders"], daily_logs)
+        # 把 bars 放到 result 里，给 benchmark 用
+        result["bars"] = make_synthetic_bars(params["n_stocks"], params["n_days"], seed=params["seed"]) \
+            if not params["use_real"] else sample_real_data(params["n_stocks"], params["n_days"], seed=params["seed"])
 
-    render_header(rep)
-    render_nav_chart(nav, rep)
-    render_metrics(rep, daily_logs)
-    render_yearly(rep)
-    render_rebalance_timeline(nav, daily_logs)
-    render_risk_signals(rep)
-
-    with st.expander("📦 原始数据 / 调试信息"):
-        st.markdown(f"**回测区间**：{nav.index[0].date()} → {nav.index[-1].date()}")
-        st.markdown(f"**调仓次数**：{sum(1 for l in daily_logs if getattr(l, 'is_rebalance', False))}")
-        st.markdown(f"**总订单数**：{len(result['orders'])}")
-        st.markdown("**NAV（最后 10 天）**")
-        st.dataframe(nav.tail(10))
+    if page == "📊 概览":
+        page_overview(params, result, nav, rep)
+    elif page == "📋 回测":
+        page_backtest(params, result, nav, rep, daily_logs)
+    elif page == "📊 行情":
+        # K 线用真实或合成都可
+        if params["use_real"]:
+            bars = sample_real_data(params["n_stocks"], params["n_days"], seed=params["seed"])
+        else:
+            bars = make_synthetic_bars(params["n_stocks"], params["n_days"], seed=params["seed"])
+        page_market(bars)
+    elif page == "🔬 过拟合":
+        page_overfit(params)
+    elif page == "🏦 实盘":
+        page_broker()
 
 
 if __name__ == "__main__":

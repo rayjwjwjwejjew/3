@@ -165,34 +165,8 @@ def test_make_synthetic_bars_seed(app_module):
 
 
 # ===== 渲染函数 =====
-def test_render_header(app_module, report_and_nav):
-    rep, nav, logs = report_and_nav
-    app_module.render_header(rep)  # 不应抛
-
-
-def test_render_nav_chart(app_module, report_and_nav):
-    rep, nav, logs = report_and_nav
-    app_module.render_nav_chart(nav, rep)  # 不应抛
-
-
-def test_render_metrics(app_module, report_and_nav):
-    rep, nav, logs = report_and_nav
-    app_module.render_metrics(rep, logs)  # 不应抛
-
-
-def test_render_yearly(app_module, report_and_nav):
-    rep, nav, logs = report_and_nav
-    app_module.render_yearly(rep)  # 不应抛
-
-
-def test_render_rebalance_timeline(app_module, report_and_nav):
-    rep, nav, logs = report_and_nav
-    app_module.render_rebalance_timeline(nav, logs)  # 不应抛
-
-
-def test_render_risk_signals(app_module, report_and_nav):
-    rep, nav, logs = report_and_nav
-    app_module.render_risk_signals(rep)  # 不应抛
+# 注：v2 重构后单页 → 多页，render_* 函数移到 page_*/_kpi_cards 等位置。
+# 详见 tests/test_app_v2.py
 
 
 # ===== 侧边栏 =====
