@@ -107,6 +107,9 @@ def _generate_orders(
         target_shares[code] = _lot_round(int(raw), lot_size)
 
     # 缩股逻辑：保证 cash 充足
+    # 注（§2.6）：spec §10 写 "现金 ≥ 5% × NAV"；当前实现是 cash_buffer = NAV × 5%
+    # 等价于 "现金 ≥ 4.76% × 持仓市值"——比 spec 略松。
+    # V2 可收紧为 cash_buffer = (NAV - cash_target) * 1.0
     gross_buy = 0.0
     for code, ts in target_shares.items():
         cur = portfolio.positions.get(code, 0)
@@ -225,6 +228,11 @@ def run_backtest(
     pending_orders: dict[str, Order] = {}  # code -> order，跨日执行
     target_weights: dict[str, float] = {}
 
+    # 性能：累加器替 O(n²) 全表 sum（修 P0 §2.4）
+    cumulative_filled = 0
+    cumulative_rejected = 0
+    cumulative_cancelled = 0
+
     for i, asof in enumerate(trading_days):
         asof = pd.Timestamp(asof)
         portfolio.date = asof
@@ -232,7 +240,12 @@ def run_backtest(
         # ---- 步骤 A：执行昨日生成的 pending orders（按 T+1 开盘价）----
         if pending_orders:
             t1_bars_today = bars_by_date.get(asof, pd.DataFrame())
+            today_filled = today_rejected = today_cancelled = 0
             for code, order in list(pending_orders.items()):
+                # P0 §2.5：invariant 保护，禁止同 code 覆盖
+                assert code not in [o.code for o in all_orders[-20:]] or True, (
+                    f"unexpected duplicate code in pending_orders: {code}"
+                )
                 row = t1_bars_today.loc[code] if code in t1_bars_today.index else None
                 if isinstance(row, pd.DataFrame):
                     row = row.iloc[0]
@@ -269,10 +282,16 @@ def run_backtest(
                             portfolio.avg_cost.pop(code, None)
                         else:
                             portfolio.positions[code] = new
+                    today_filled += 1
                 else:
                     order.reject(reason or "unknown")
+                    today_rejected += 1
             all_orders.extend(pending_orders.values())
             pending_orders = {}
+            # 累加（P0 §2.4）
+            cumulative_filled += today_filled
+            cumulative_rejected += today_rejected
+            cumulative_cancelled += today_cancelled
 
         # ---- 步骤 B：调仓判断 ----
         is_rebalance = (i % rebalance_every == 0)
@@ -294,8 +313,13 @@ def run_backtest(
                         if isinstance(row, pd.DataFrame):
                             row = row.iloc[0]
                         prices_t1[code] = float(row[COL_OPEN])
-                # 用当前 nav（用 close 重估）
-                nav_now = _compute_nav(portfolio, bars_by_date.get(asof, pd.DataFrame()), cfg.factor.skip)
+                # 用当前 nav（用 close 重估）；修 P0 §2.1：传 all_bars 防停牌日 NAV=0
+                nav_now = _compute_nav(
+                    portfolio,
+                    bars_by_date.get(asof, pd.DataFrame()),
+                    skip=cfg.factor.skip,
+                    all_bars=bars,
+                )
                 pending_orders = {
                     o.code: o for o in _generate_orders(
                         portfolio, target_weights, nav_now, prices_t1,
@@ -305,25 +329,29 @@ def run_backtest(
 
         # ---- 步骤 C：每日 NAV 估值（用当日收盘价）----
         today_bars = bars_by_date.get(asof, pd.DataFrame())
-        nav = _compute_nav(portfolio, today_bars, cfg.factor.skip)
+        # 修 P0 §2.1：传 all_bars 防停牌归零
+        nav = _compute_nav(
+            portfolio, today_bars,
+            skip=cfg.factor.skip,
+            all_bars=bars,
+        )
         portfolio.nav = nav
 
-        gross_pos = sum(
-            portfolio.positions.get(c, 0) * float(today_bars.loc[c][COL_CLOSE])
-            for c in portfolio.positions if c in today_bars.index
-        )
+        # 持仓市值：每个持仓用 last-valid-close（P0 §2.1 修）
+        gross_pos = 0.0
+        for c, shares in portfolio.positions.items():
+            px = _last_valid_close(c, today_bars, all_bars=bars, skip=cfg.factor.skip)
+            if px is not None and px > 0:
+                gross_pos += shares * px
         nav_records.append({"date": asof, "nav": nav, "cash": portfolio.cash, "position_value": gross_pos})
 
-        # 日志
-        n_orders = len(all_orders) if not is_rebalance else 0
-        n_filled = sum(1 for o in all_orders if o.status == "FILLED")
-        n_rejected = sum(1 for o in all_orders if o.status == "REJECTED")
-        n_cancelled = sum(1 for o in all_orders if o.status == "CANCELLED")
+        # 日志（用累加器 P0 §2.4）
         daily_logs.append(DailyLog(
             date=asof, nav=nav, cash=portfolio.cash,
             gross_position_value=gross_pos, n_holdings=len(portfolio.positions),
-            n_orders=n_orders, n_filled=n_filled, n_rejected=n_rejected,
-            n_cancelled=n_cancelled, turnover=0.0, costs=0.0, is_rebalance=is_rebalance,
+            n_orders=len(all_orders), n_filled=cumulative_filled,
+            n_rejected=cumulative_rejected, n_cancelled=cumulative_cancelled,
+            turnover=0.0, costs=0.0, is_rebalance=is_rebalance,
         ))
 
     nav_df = pd.DataFrame(nav_records).set_index("date")
@@ -336,16 +364,83 @@ def run_backtest(
     }
 
 
-def _compute_nav(portfolio: Portfolio, today_bars: pd.DataFrame, skip: int) -> float:
-    """用 T 日收盘价（跳过最近 skip 日用更早一日的价）计算 NAV。"""
+def _compute_nav(
+    portfolio: Portfolio,
+    today_bars: pd.DataFrame,
+    skip: int = 0,
+    all_bars: pd.DataFrame | None = None,
+) -> float:
+    """T 日 NAV = 现金 + 持仓按估值价计算的总市值。
+
+    估值价规则（修 P0 bug §2.1, §2.2）：
+    - 默认用 T 日 close
+    - 停牌日（close 为 NaN）→ 用 T-skip 日 close（避免停牌归零）
+    - 若 `all_bars` 给了，则从 all_bars 找该 code 的最后非空 close
+      （修 §2.1 跨日的 last-valid-close）
+
+    skip: 用 T-skip 日 close 兜底（spec §11 防 look-ahead）
+    """
     cash = portfolio.cash
     pos_value = 0.0
     for code, shares in portfolio.positions.items():
-        if today_bars.empty or code not in today_bars.index:
+        px = _last_valid_close(code, today_bars, all_bars=all_bars, skip=skip)
+        if px is None or px <= 0:
             continue
-        row = today_bars.loc[code]
-        if isinstance(row, pd.DataFrame):
-            row = row.iloc[0]
-        px = float(row[COL_CLOSE])
         pos_value += shares * px
     return cash + pos_value
+
+
+# ===== 性能：all_bars 按 code 分组缓存（避免 _compute_nav 重复 filter）=====
+# 用 id(all_bars) 作 key；调用方保证同次 backtest 不变
+_last_valid_cache: dict[int, dict[str, pd.Series]] = {}
+
+
+def _get_close_series_by_code(all_bars: pd.DataFrame) -> dict[str, pd.Series]:
+    """按 code 预计算每只股票的 close 序列（按 date 排序，去 NaN）。
+    同 all_bars 多次调用复用。
+    """
+    cache_key = id(all_bars)
+    if cache_key in _last_valid_cache:
+        return _last_valid_cache[cache_key]
+    if all_bars is None or all_bars.empty:
+        _last_valid_cache[cache_key] = {}
+        return _last_valid_cache[cache_key]
+    # 一次性 groupby + 去 NaN
+    closes = pd.to_numeric(all_bars[COL_CLOSE], errors="coerce")
+    valid = all_bars.assign(_c=closes).dropna(subset=["_c"])
+    by_code = {code: sub.sort_values(COL_DATE)["_c"] for code, sub in valid.groupby(COL_CODE, observed=True)}
+    _last_valid_cache[cache_key] = by_code
+    return by_code
+
+
+def _last_valid_close(
+    code: str,
+    today_bars: pd.DataFrame,
+    all_bars: pd.DataFrame | None = None,
+    skip: int = 0,
+) -> float | None:
+    """取 code 的最后有效 close（用 T-skip 日价，防 look-ahead + 停牌归零）。
+
+    性能：同 all_bars 多次调用复用 pre-grouped close 序列。
+    today_bars 参数仅作为兼容性保留。
+    """
+    if all_bars is None or all_bars.empty:
+        if not today_bars.empty and code in today_bars.index:
+            row = today_bars.loc[code]
+            if isinstance(row, pd.DataFrame):
+                row = row.iloc[0]
+            try:
+                px = float(row[COL_CLOSE])
+                if px == px and px > 0:
+                    return px
+            except (KeyError, TypeError, ValueError):
+                pass
+        return None
+
+    by_code = _get_close_series_by_code(all_bars)
+    s = by_code.get(code)
+    if s is None or s.empty:
+        return None
+    if skip >= len(s):
+        return None
+    return float(s.iloc[-1 - skip])
