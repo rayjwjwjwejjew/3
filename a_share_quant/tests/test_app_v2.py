@@ -148,8 +148,6 @@ def test_excess_return(bench_module, sample_nav, sample_bars):
 
 def test_load_real_benchmark_not_found(bench_module, tmp_path, monkeypatch):
     """无真实数据时返回 None。"""
-    # tmp_path 隔离
-    from src.config import DATA_PROCESSED
     monkeypatch.setattr("src.data.benchmark.benchmarks.Path", lambda x: tmp_path / x if not str(x).startswith("/") else Path(x))
     # 实际上不能直接 monkeypatch Path 那样，简单测：直接传 path 参数
     result = bench_module.load_real_benchmark("sh000300", path=tmp_path / "sh000300.parquet")
@@ -195,7 +193,6 @@ def test_export_png(charts_module, sample_nav, tmp_path):
 # ===== 数据加载器 =====
 def test_data_loader_not_found(loader_module, tmp_path, monkeypatch):
     """无真实数据时返回 None。"""
-    from src.config import DATA_PROCESSED
     # 直接测：当前真实数据状态
     # 注：测试运行时不依赖真实数据
     if not (Path("data/processed") / "bars.parquet").exists():
@@ -217,3 +214,22 @@ def test_app_docstring(app_module):
     assert app_module.__doc__ is not None
     assert "streamlit" in app_module.__doc__.lower()
     assert "同花顺" in app_module.__doc__ or "tonghuashun" in app_module.__doc__.lower() or "K 线" in app_module.__doc__
+
+
+def test_app_uses_top_level_workspace_navigation():
+    """研究视图应从侧边栏参数中分离，保留一条清晰的主导航。"""
+    source = (PROJECT_ROOT / "app.py").read_text(encoding="utf-8")
+    assert '"研究工作区"' in source
+    assert "horizontal=True" in source
+    for label in ("总览", "回测明细", "行情观察", "稳健性", "执行边界"):
+        assert label in source
+
+
+def test_theme_keeps_accessible_reduced_motion_fallback():
+    import inspect
+
+    from src.webapp import theme
+
+    assert "prefers-reduced-motion: reduce" in theme.APP_CSS
+    assert "prefers-reduced-transparency: reduce" in theme.APP_CSS
+    assert "研究用途 · 不连接券商" in inspect.getsource(theme.render_app_header)
