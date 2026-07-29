@@ -44,7 +44,7 @@ a_share_quant/
 | 阶段 | 状态 | 产物 |
 |---|---|---|
 | 1. 边界 | ✅ 完成 | `strategy_spec.md` + `config/strategy.yaml` |
-| 2. 环境 | ⏳ 待办 | Python / VS Code / Git / Jupyter / venv |
+| 2. 环境 | ✅ 完成 | `.venv` + `requirements.txt` + Jupyter kernel + 4 项冒烟测试通过 |
 | 3. 项目骨架 | ⏳ 待办 | 各 `__init__.py`、`requirements.txt` |
 | 4. 数据 | ⏳ 待办 | 选数据源、写 `downloader.py` |
 | 5. 数据验证 | ⏳ 待办 | `validator.py` + `data_quality_report.csv` |

@@ -1,0 +1,26 @@
+# 核心数据栈
+numpy==1.26.4
+pandas==2.2.2
+pyarrow==16.1.0
+duckdb==0.10.3
+
+# 行情数据（V1 选用 baostock，避开 akshare 的 Python 3.12+ 硬性要求）
+baostock==0.9.3
+# akshare==1.16.72  # 暂不可用：当前 PyPI 上全部 akshare 版本要求 Python >= 3.12，沙箱内仅 3.11 可用；待升级 Python 后再启用
+
+# 工具
+pyyaml==6.0.1
+
+# 报告
+matplotlib==3.9.0
+
+# 交互开发
+jupyter==1.0.0
+ipykernel==6.29.4
+
+# 测试
+pytest==8.2.2
+pytest-cov==5.0.0
+
+# 静态检查（V1 仅启用，不强制）
+ruff==0.5.0
