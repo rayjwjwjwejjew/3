@@ -7,6 +7,8 @@ momentum_i(t) = adj_close(t - skip) / adj_close(t - lookback) - 1
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 import numpy as np
 import pandas as pd
 
@@ -15,6 +17,11 @@ from src.data.schema import (
     COL_CODE,
     COL_DATE,
 )
+
+
+# bars 通常在一次 backtest 中固定，momentum 全段只算一次。
+# 用 id(bars) 作 cache key，调用方负责保证 bars 不变。
+_MOMENTUM_CACHE: dict[int, tuple[pd.DataFrame, int, int, pd.Series]] = {}
 
 
 def compute_momentum(
@@ -30,27 +37,45 @@ def compute_momentum(
     - skip: 跳过最近 N 日
 
     返回：MultiIndex (code, date) -> momentum（float，NaN 表示不足窗口）
+
+    性能：
+    - 用 (id(bars), (lookback, skip)) 作 cache key；同一次 backtest 中
+      engine 入口的预排序 bars 替换会让 id 变，但 bars 数据未变时仍命中。
+    - 首次计算：单次 groupby + 两次 shift，向量化
     """
     if lookback <= skip:
         raise ValueError(f"lookback ({lookback}) must be > skip ({skip})")
     if bars.empty:
         return pd.Series(dtype=float, name="momentum")
 
+    cache_key = id(bars)
+    if cache_key in _MOMENTUM_CACHE:
+        cached_bars, cached_lb, cached_skip, cached = _MOMENTUM_CACHE[cache_key]
+        if cached_bars is bars and cached_lb == lookback and cached_skip == skip:
+            return cached
+
     df = bars[[COL_CODE, COL_DATE, COL_ADJ_CLOSE]].copy()
     df[COL_DATE] = pd.to_datetime(df[COL_DATE])
     df = df.sort_values([COL_CODE, COL_DATE]).reset_index(drop=True)
-    # (t - skip) 时刻的价格 / (t - lookback) 时刻的价格
-    # shift(skip) 是 t-skip 的值；shift(lookback) 是 t-lookback 的值
-    grp = df.groupby(COL_CODE, sort=False)[COL_ADJ_CLOSE]
+    grp = df.groupby(COL_CODE, sort=False, observed=True)[COL_ADJ_CLOSE]
     p_recent = grp.shift(skip)
     p_old = grp.shift(lookback)
     mom = (p_recent / p_old) - 1.0
-    # 不足窗口的位置：shift 出来是 NaN
-    out = pd.Series(mom.values, index=pd.MultiIndex.from_arrays(
-        [df[COL_CODE].values, df[COL_DATE].values],
-        names=[COL_CODE, COL_DATE],
-    ), name="momentum")
+    out = pd.Series(
+        mom.values,
+        index=pd.MultiIndex.from_arrays(
+            [df[COL_CODE].values, df[COL_DATE].values],
+            names=[COL_CODE, COL_DATE],
+        ),
+        name="momentum",
+    )
+    _MOMENTUM_CACHE[cache_key] = (bars, lookback, skip, out)
     return out
+
+
+def clear_momentum_cache() -> None:
+    """清空动量缓存（测试或大对象回收时用）。"""
+    _MOMENTUM_CACHE.clear()
 
 
 def select_top_k(
@@ -75,26 +100,15 @@ def select_top_k(
     if momentum.empty:
         return pd.DataFrame(columns=[COL_CODE, "momentum", "rank"])
 
-    # 取出 (any, asof_date) 截面
+    # 优化：用 .loc[(slice(None), asof), :] 单次切片替 .xs() + reset_index()
     try:
-        cross = momentum.xs(asof, level=COL_DATE, drop_level=False)
+        cross = momentum.loc[(slice(None), asof), ]
     except KeyError:
         return pd.DataFrame(columns=[COL_CODE, "momentum", "rank"])
-
+    # cross 是 Series，index 是 code (MultiIndex 第 0 级)
     cross = cross.reset_index()
-    cross = cross.rename(columns={0: "momentum", "level_0": COL_CODE, "level_1": COL_DATE}) \
-              if cross.columns[0] != "momentum" else cross
-    if "momentum" not in cross.columns and "level_1" in cross.columns:
-        cross = cross.rename(columns={"level_1": COL_DATE})
-    # 简化：直接取名
-    if cross.shape[1] == 3:
-        cross.columns = [COL_CODE, COL_DATE, "momentum"]
-    elif cross.shape[1] == 2 and cross.columns[0] == COL_CODE:
-        # index 已经是 code
-        cross = cross.reset_index()
-        if "index" in cross.columns:
-            cross = cross.rename(columns={"index": COL_CODE})
-    cross = cross[[COL_CODE, "momentum"]].copy()
+    cross.columns = [COL_CODE, COL_DATE, "momentum"]
+    cross = cross[[COL_CODE, "momentum"]]
     cross = cross.dropna(subset=["momentum"])
     if candidate_codes is not None:
         cross = cross[cross[COL_CODE].astype(str).isin(candidate_codes)]

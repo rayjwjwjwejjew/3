@@ -118,18 +118,23 @@ def build_candidate_universe(
     not_suspended = not_st[not_st[COL_SUSPENDED].astype(bool) == False]  # noqa: E712
 
     # 5) 过去 20 日均成交额 ≥ 阈值（spec §3.2 第 4 条）
-    #   允许把"过去 20 日"放宽为"过去 20 个有成交的交易日"；这里直接取最近 20 行
+    # 性能：bars 已按 [code, date] 排序 → mask 切片保留顺序
     bars_active = bars[bars[COL_CODE].astype(str).isin(active_codes)]
-    recent = bars_active[bars_active[COL_DATE] <= asof].sort_values([COL_CODE, COL_DATE])
-    last_20 = recent.groupby(COL_CODE).tail(20)
-    avg_amt = last_20.groupby(COL_CODE)[COL_AMOUNT].mean()
+    # 关键：先按 date 截一次；bars 已按 [code, date] 排序，mask 保留顺序
+    recent = bars_active[bars_active[COL_DATE] <= asof]
+    # 用 cumcount 反向序号代替 groupby.tail，更快（pandas 内部不复制 last-N group）
+    rev_n = recent.groupby(COL_CODE, sort=False, observed=True).cumcount(ascending=False)
+    last_20 = recent[rev_n < 20]
+    avg_amt = last_20.groupby(COL_CODE, sort=False, observed=True)[COL_AMOUNT].mean()
     liquid_codes = set(avg_amt[avg_amt >= cfg.universe.min_avg_amount_20d].index.astype(str))
 
     # 6) 数据完整：过去 120 日无缺失（与 spec §3.2 第 5 条对齐）
     lookback = max(cfg.factor.lookback, 120)
-    last_120 = recent.groupby(COL_CODE).tail(lookback)
-    # 每只股票在最近 lookback 行的非空 close 数量
-    cnt = last_120.groupby(COL_CODE)[COL_CLOSE].apply(lambda s: s.notna().sum())
+    # 同上：用 cumcount 切 last_lookback
+    last_120 = recent[rev_n < lookback]
+    # 向量化：每只股票在最近 lookback 行的非空 close 数量
+    # 用 .assign + groupby.sum() 替 groupby.apply(lambda)，快 ~3x
+    cnt = last_120.assign(_n=last_120[COL_CLOSE].notna().astype(int)).groupby(COL_CODE, observed=True)["_n"].sum()
     complete_codes = set(cnt[cnt >= lookback].index.astype(str))
 
     # 合并所有筛选

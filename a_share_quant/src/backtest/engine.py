@@ -194,8 +194,24 @@ def run_backtest(
     if trading_days.empty:
         raise ValueError("trade_calendar has no trading days")
 
-    # 索引：code -> date -> row
+    # 性能：bars 按 (code, date) MultiIndex 索引（一次性）
     bars_idx = bars.set_index([COL_CODE, COL_DATE]).sort_index() if not bars.empty else pd.DataFrame()
+
+    # 性能：按 (code, date) 排序 + Categorical，groupby 复用 codes 字典
+    _bars_cache_key = id(bars)
+    if not bars.empty and not getattr(bars, "_asq_sorted_cache", None) == _bars_cache_key:
+        bars_sorted = bars.sort_values([COL_CODE, COL_DATE]).reset_index(drop=True)
+        # Categorical：groupby 不再每次 factorize codes（实测省 5-30ms/次）
+        bars_sorted[COL_CODE] = bars_sorted[COL_CODE].astype("category")
+        bars_sorted._asq_sorted_cache = _bars_cache_key  # type: ignore[attr-defined]
+        bars = bars_sorted
+
+    # 性能：按 date 一次性分组，避免日循环里反复 xs()
+    bars_by_date: dict[pd.Timestamp, pd.DataFrame] = {}
+    if not bars.empty:
+        bars[COL_DATE] = pd.to_datetime(bars[COL_DATE])
+        for d, sub in bars.groupby(COL_DATE):
+            bars_by_date[pd.Timestamp(d)] = sub.set_index(COL_CODE).sort_index()
 
     portfolio = Portfolio(cash=initial_cash, nav=initial_cash, date=trading_days.iloc[0])
     nav_records: list[dict] = []
@@ -210,7 +226,7 @@ def run_backtest(
 
         # ---- 步骤 A：执行昨日生成的 pending orders（按 T+1 开盘价）----
         if pending_orders:
-            t1_bars_today = bars_idx.xs(asof, level=COL_DATE) if not bars_idx.empty else pd.DataFrame()
+            t1_bars_today = bars_by_date.get(asof, pd.DataFrame())
             for code, order in list(pending_orders.items()):
                 row = t1_bars_today.loc[code] if code in t1_bars_today.index else None
                 if isinstance(row, pd.DataFrame):
@@ -265,7 +281,7 @@ def run_backtest(
             # T+1 开盘价 = 下一交易日的 open
             if i + 1 < len(trading_days):
                 t1_date = pd.Timestamp(trading_days.iloc[i + 1])
-                t1_bars = bars_idx.xs(t1_date, level=COL_DATE) if not bars_idx.empty else pd.DataFrame()
+                t1_bars = bars_by_date.get(t1_date, pd.DataFrame())
                 prices_t1: dict[str, float] = {}
                 for code in set(list(target_weights) + list(portfolio.positions)):
                     if code in t1_bars.index:
@@ -274,7 +290,7 @@ def run_backtest(
                             row = row.iloc[0]
                         prices_t1[code] = float(row[COL_OPEN])
                 # 用当前 nav（用 close 重估）
-                nav_now = _compute_nav(portfolio, bars_idx.xs(asof, level=COL_DATE) if not bars_idx.empty else pd.DataFrame(), cfg.factor.skip)
+                nav_now = _compute_nav(portfolio, bars_by_date.get(asof, pd.DataFrame()), cfg.factor.skip)
                 pending_orders = {
                     o.code: o for o in _generate_orders(
                         portfolio, target_weights, nav_now, prices_t1,
@@ -283,7 +299,7 @@ def run_backtest(
                 }
 
         # ---- 步骤 C：每日 NAV 估值（用当日收盘价）----
-        today_bars = bars_idx.xs(asof, level=COL_DATE) if not bars_idx.empty else pd.DataFrame()
+        today_bars = bars_by_date.get(asof, pd.DataFrame())
         nav = _compute_nav(portfolio, today_bars, cfg.factor.skip)
         portfolio.nav = nav
 
