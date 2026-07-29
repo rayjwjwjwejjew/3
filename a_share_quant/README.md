@@ -45,7 +45,7 @@ a_share_quant/
 |---|---|---|
 | 1. 边界 | ✅ 完成 | `strategy_spec.md` + `config/strategy.yaml` |
 | 2. 环境 | ✅ 完成 | `.venv` + `requirements.txt` + Jupyter kernel + 4 项冒烟测试通过 |
-| 3. 项目骨架 | ⏳ 待办 | 各 `__init__.py`、`requirements.txt` |
+| 3. 项目骨架 | ✅ 完成 | `src/` 各包 `__init__.py` + `data/schema.py` + `config.py` + `python -m src` 端到端通过 + 10 项测试 |
 | 4. 数据 | ⏳ 待办 | 选数据源、写 `downloader.py` |
 | 5. 数据验证 | ⏳ 待办 | `validator.py` + `data_quality_report.csv` |
 | 6. 股票池 | ⏳ 待办 | `universe/stock_pool.py` |
