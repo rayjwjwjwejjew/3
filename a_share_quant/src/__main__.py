@@ -91,6 +91,20 @@ def _cmd_clean(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_validate(args: argparse.Namespace) -> int:
+    """阶段 5：对 processed/ 跑 8 项质量检查，生成报告 + assert_clean。"""
+    from src.data.validator import DataQualityError, validate_processed
+    try:
+        df = validate_processed(asof_date=args.asof, report_path=args.report)
+    except DataQualityError as e:
+        print(f"DATA QUALITY ERROR:\n{e}", file=sys.stderr)
+        return 2
+    print(f"validate OK ({len(df)} findings)")
+    if not df.empty:
+        print(df.to_string(index=False))
+    return 0
+
+
 def _cmd_self_test(_args: argparse.Namespace) -> int:
     """不联网：用 fixture 走完 downloader/cleaner 管道。
 
@@ -152,6 +166,11 @@ def build_parser() -> argparse.ArgumentParser:
     # self-test
     sub.add_parser("self-test", help="run the pipeline against local fixtures (no network)")
 
+    # validate
+    pv = sub.add_parser("validate", help="run data quality checks on processed/")
+    pv.add_argument("--asof", required=True, help="as-of date YYYY-MM-DD")
+    pv.add_argument("--report", default=None, help="override report path")
+
     return p
 
 
@@ -168,6 +187,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_clean(args)
     if args.cmd == "self-test":
         return _cmd_self_test(args)
+    if args.cmd == "validate":
+        return _cmd_validate(args)
     parser.print_help()
     return 1
 
