@@ -169,13 +169,23 @@ def run_backtest(
     stock_basic: pd.DataFrame,
     trade_calendar: pd.DataFrame,
     initial_cash: float = 1_000_000.0,
+    rebalance_every: int | None = None,
+    lookback: int | None = None,
+    skip: int | None = None,
+    top_k: int | None = None,
+    cost_multiplier: float = 1.0,
 ) -> dict[str, Any]:
     """跑完整回测，返回 {nav_series, daily_logs, orders, portfolio}。
 
-    V1 简化：调仓日固定每 20 个交易日（第 0、20、40...）。
+    可选参数覆盖 yaml（V1 阶段仅这几个用于过拟合测试）。
+    V1 简化：调仓日固定每 N 个交易日（第 0、N、2N...）。
     """
     cfg = load_config()
-    rebalance_every = cfg.signal.rebalance_every
+    rebalance_every = rebalance_every if rebalance_every is not None else cfg.signal.rebalance_every
+    lookback = lookback if lookback is not None else cfg.factor.lookback
+    skip = skip if skip is not None else cfg.factor.skip
+    top_k = top_k if top_k is not None else cfg.signal.top_k
+    cost_multiplier = max(0.0, float(cost_multiplier))
 
     # 交易日序列
     trading_days = pd.to_datetime(trade_calendar.loc[
@@ -208,12 +218,20 @@ def run_backtest(
                 reason = _check_tradable(order, row)
                 if reason is None and row is not None:
                     px = float(row[COL_OPEN]) * (1 + cfg.execution.slippage_bps / 10000)
-                    # 计算成本
+                    # 计算成本（支持 cost_multiplier 放大用于过拟合测试）
                     cost = calc_cost(
                         code, order.side, order.shares * px,
                         cfg.cost.commission_rate, cfg.cost.commission_min,
                         cfg.cost.stamp_tax_rate, cfg.cost.transfer_fee_rate,
                     )
+                    if cost_multiplier != 1.0:
+                        scaled = cost.total * cost_multiplier
+                        cost = type(cost)(
+                            commission=cost.commission * cost_multiplier,
+                            stamp_tax=cost.stamp_tax * cost_multiplier,
+                            transfer_fee=cost.transfer_fee * cost_multiplier,
+                            total=scaled,
+                        )
                     order.fill(px, cost_total=cost.total,
                                cost_detail={"commission": cost.commission,
                                             "stamp_tax": cost.stamp_tax,
@@ -240,8 +258,10 @@ def run_backtest(
 
         if is_rebalance:
             # 用截至 T 日（不含 T+1，因为信号是 T 收盘后的）的数据
-            # 这里 asof 是 T 日；target 用 T 日信号；pending orders 会在 T+1 成交
-            target_weights = generate_target_weights(bars, stock_basic, asof)
+            target_weights = generate_target_weights(
+                bars, stock_basic, asof,
+                lookback=lookback, skip=skip, top_k=top_k,
+            )
             # T+1 开盘价 = 下一交易日的 open
             if i + 1 < len(trading_days):
                 t1_date = pd.Timestamp(trading_days.iloc[i + 1])

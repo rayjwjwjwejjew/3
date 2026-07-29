@@ -147,6 +147,104 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_overfit(args: argparse.Namespace) -> int:
+    """阶段 12：过拟合 / 稳健性测试。"""
+    import pandas as pd
+    from pathlib import Path
+    from src.data.cleaner import PROC_BARS, PROC_STOCK_BASIC, PROC_TRADE_CALENDAR
+    from src.reports.overfit import run_all_overfit_tests
+
+    bars_p = PROC_BARS() if callable(PROC_BARS) else PROC_BARS
+    sb_p = PROC_STOCK_BASIC() if callable(PROC_STOCK_BASIC) else PROC_STOCK_BASIC
+    cal_p = PROC_TRADE_CALENDAR() if callable(PROC_TRADE_CALENDAR) else PROC_TRADE_CALENDAR
+
+    if not bars_p.exists():
+        print(f"bars not found: {bars_p}", file=sys.stderr)
+        return 2
+    bars = pd.read_parquet(bars_p)
+    sb = pd.read_parquet(sb_p) if sb_p.exists() else pd.DataFrame()
+    cal = pd.read_parquet(cal_p) if cal_p.exists() else pd.DataFrame()
+
+    out = run_all_overfit_tests(bars, sb, cal, split_date=args.split_date)
+    print("=" * 60)
+    for name, summary in out.items():
+        print(f"\n── {name} ──")
+        print(summary.pretty())
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for name, summary in out.items():
+        for r in summary.results:
+            d = r.report.to_dict()
+            row = {"test": name, "label": r.label, **r.params}
+            for k in ("total_return", "annualized_return", "annualized_vol", "sharpe",
+                      "max_drawdown", "filled_trades", "annualized_turnover", "cost_ratio"):
+                row[k] = d.get(k)
+            rows.append(row)
+    pd.DataFrame(rows).to_csv(out_path, index=False)
+    print(f"\n→ written to {out_path}")
+    return 0
+
+
+def _cmd_paper(args: argparse.Namespace) -> int:
+    """阶段 13：模拟盘单日任务（幂等）。"""
+    import pandas as pd
+    from pathlib import Path
+    from src.data.cleaner import PROC_BARS, PROC_STOCK_BASIC, PROC_TRADE_CALENDAR
+    from src.backtest.paper import run_daily
+
+    bars_p = PROC_BARS() if callable(PROC_BARS) else PROC_BARS
+    sb_p = PROC_STOCK_BASIC() if callable(PROC_STOCK_BASIC) else PROC_STOCK_BASIC
+    cal_p = PROC_TRADE_CALENDAR() if callable(PROC_TRADE_CALENDAR) else PROC_TRADE_CALENDAR
+
+    if not bars_p.exists():
+        print(f"bars not found: {bars_p}", file=sys.stderr)
+        return 2
+    bars = pd.read_parquet(bars_p)
+    sb = pd.read_parquet(sb_p) if sb_p.exists() else pd.DataFrame()
+    cal = pd.read_parquet(cal_p) if cal_p.exists() else pd.DataFrame()
+
+    state = run_daily(
+        bars, sb, cal, asof_date=args.asof,
+        initial_cash=args.initial_cash,
+        state_dir=Path(args.state_dir),
+    )
+    print(f"date: {state.asof_date}")
+    print(f"target weights: {state.target_weights}")
+    print(f"orders: {len(state.orders)}")
+    for od in state.orders:
+        print(f"  {od['side']} {od['code']} {od['shares']} @ {od['price']} → {od['status']}")
+    if state.notes and state.notes != "ok":
+        print(f"notes: {state.notes}")
+    return 0
+
+
+def _cmd_broker(args: argparse.Namespace) -> int:
+    """阶段 14：broker 操作。V1 阶段仅支持 emergency stop / status。"""
+    from src.broker import emergency_stop, is_emergency_stopped, clear_emergency_stop
+    from src.risk.controls import TRADING_ENABLED
+
+    if args.action == "emergency-stop":
+        reason = input("reason for emergency stop: ").strip() or "manual CLI"
+        emergency_stop(reason)
+        print("EMERGENCY STOP triggered. All auto-trading disabled.")
+        return 0
+    if args.action == "clear-stop":
+        ans = input("type 'YES' to clear emergency stop: ").strip()
+        if ans == "YES":
+            clear_emergency_stop()
+            print("emergency stop cleared.")
+        else:
+            print("aborted.")
+        return 0
+    if args.action == "status":
+        print(f"TRADING_ENABLED: {TRADING_ENABLED}")
+        print(f"emergency_stopped: {is_emergency_stopped()}")
+        print("V1 broker layer: manual mode only (no auto-submit)")
+        return 0
+    return 1
+
+
 def _cmd_self_test(args: argparse.Namespace) -> int:
     """不联网：用 fixture 走完 downloader/cleaner 管道。
 
@@ -244,6 +342,22 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument("--initial-cash", type=float, default=1_000_000.0)
     pb.add_argument("--out", default="results/nav.csv", help="output NAV csv path")
 
+    # overfit
+    po = sub.add_parser("overfit", help="run overfitting / robustness tests")
+    po.add_argument("--split-date", required=True, help="in-sample / out-of-sample split YYYY-MM-DD")
+    po.add_argument("--out", default="results/overfit.csv", help="output CSV")
+
+    # paper
+    pp = sub.add_parser("paper", help="run a single paper-trading day (idempotent)")
+    pp.add_argument("--asof", required=True, help="paper trade as-of date YYYY-MM-DD")
+    pp.add_argument("--initial-cash", type=float, default=1_000_000.0)
+    pp.add_argument("--state-dir", default="results/paper_state", help="state persistence dir")
+
+    # broker (manual only in V1)
+    pbr = sub.add_parser("broker", help="broker operations (V1: manual only)")
+    pbr.add_argument("--action", choices=["emergency-stop", "clear-stop", "status"],
+                     default="status")
+
     return p
 
 
@@ -264,6 +378,12 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_validate(args)
     if args.cmd == "backtest":
         return _cmd_backtest(args)
+    if args.cmd == "overfit":
+        return _cmd_overfit(args)
+    if args.cmd == "paper":
+        return _cmd_paper(args)
+    if args.cmd == "broker":
+        return _cmd_broker(args)
     parser.print_help()
     return 1
 
