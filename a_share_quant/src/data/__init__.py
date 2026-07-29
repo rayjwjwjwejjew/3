@@ -1,10 +1,12 @@
 """数据层：下载、清洗、验证。
 
-计划在阶段 4-5 实现以下模块：
-- `downloader.py` : 从 baostock 拉取原始数据到 `data/raw/`
-- `cleaner.py`    : 原始数据 → `data/processed/`，统一字段名
-- `validator.py`  : 数据质量检查，输出 `data_quality_report.csv`
-- `schema.py`     : ✅ 已实现，定义字段契约
+已实现：
+- `schema.py`     : 字段契约 + 订单状态机
+- `downloader.py` : baostock → `data/raw/`
+- `cleaner.py`    : `data/raw/` → `data/processed/`
+
+待实现（阶段 5）：
+- `validator.py`  : 数据质量检查
 """
 
 from src.data.schema import (
