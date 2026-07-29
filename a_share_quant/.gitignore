@@ -42,6 +42,9 @@ Thumbs.db
 profile_default/
 ipython_config.py
 
+# ===== Streamlit =====
+.streamlit/secrets.toml
+
 # ===== 测试 / 覆盖率 =====
 .pytest_cache/
 .coverage

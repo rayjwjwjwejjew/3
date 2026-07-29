@@ -1,60 +1,115 @@
 # a_share_quant
 
-A 股月频量化系统（V1：数据 + 简单策略 + 基础回测）
+A 股月频量化系统（V1 完整闭环 + Streamlit Web App）
 
-## 当前阶段
+## 当前状态
 
-**第一阶段进行中**：确定第一版边界。
+**V1 全部 14 阶段完成** + 性能优化（2.5x）+ 同花顺风格 Web App。
+
+- **145/145 测试通过**（含性能基线保护）
+- **真实规模回测**：500×500 → 2.7s · 800×800 → 9.3s
+- **Web App**：`streamlit run app.py` 启动同花顺风格交互面板
 
 ## 必读
 
-- [`strategy_spec.md`](./strategy_spec.md) — 策略规范的**唯一事实来源**。在写任何代码前，请先读它。
+- [`strategy_spec.md`](./strategy_spec.md) — 策略规范的**唯一事实来源**
+- [`app.py`](./app.py) — Web App 入口
+
+## 快速开始
+
+```bash
+make install        # 创建 venv + 装所有依赖
+make test           # 跑全部 145 项测试
+make app            # 启动 Web App → 浏览器打开 http://localhost:8501
+```
+
+## 14 阶段路线图（全部完成 ✅）
+
+| # | 阶段 | 状态 | 关键产物 |
+|---|---|---|---|
+| 1 | 边界 | ✅ | `strategy_spec.md` + `config/strategy.yaml` |
+| 2 | 环境 | ✅ | `.venv` (Py 3.11) + 9 核心包 + Jupyter kernel |
+| 3 | 项目骨架 | ✅ | `src/data/schema.py` 字段契约 + `config.py` frozen dataclass |
+| 4 | 数据 | ✅ | `downloader.py` (baostock) + `cleaner.py` (raw→processed) |
+| 5 | 验证 | ✅ | `validator.py` 8 项 check + ERROR/WARNING 分级 |
+| 6 | 股票池 | ✅ | `stock_pool.py` 双层 candidate + tradable |
+| 7 | 信号 | ✅ | `momentum.py` (120-5) + `signal.py` 等权 top 10 |
+| 8 | 订单 | ✅ | `broker.py` 6 状态机 + `costs.py` 佣金/印花税 |
+| 9 | 引擎 | ✅ | `engine.py` T+1 开盘成交 + 整手 + 5% 现金缓冲 |
+| 10 | 风控 | ✅ | `controls.py` 6 check + TRADING_ENABLED 总开关 |
+| 11 | 报告 | ✅ | `performance.py` 13 指标 + rich TUI |
+| 12 | 过拟合 | ✅ | `overfit.py` 5 项稳健性测试 |
+| 13 | 模拟盘 | ✅ | `paper.py` 幂等每日任务 |
+| 14 | 实盘 | ✅ | `broker/` 框架（V1 手动模式，不连券商） |
+
+## 性能
+
+- 性能优化：6.9s → 2.7s（500×500 数据，**2.5x 加速**）
+- 真实规模（800×800 = 64万行）：9.3s
+- 性能基线测试保护（`tests/test_performance.py`）
+
+## Web App（同花顺风格）
+
+```bash
+make app
+# 浏览器打开 http://localhost:8501
+```
+
+**特性**：
+- 侧边栏：参数面板（lookback / skip / top_k / 调仓频率 / 资金 / 数据规模）
+- 顶部 4 个 KPI 大数字卡片（总收益 / 年化 / 回撤 / Sharpe）
+- Plotly 真实净值曲线（可缩放、悬停）
+- 关键指标 + 交易统计（两列）
+- 年度收益含柱状图
+- 调仓时间线
+- 风险信号（自动异常检测）
+
+**A 股惯例**：红涨绿跌、▲/▼ Unicode 字符、HEAVY box 标题、ROUNDED 区块。
+
+## CLI
+
+```bash
+python -m src                       # 阶段 3 dry run
+python -m src download              # 拉数据（需联网）
+python -m src clean                 # raw → processed
+python -m src self-test --keep-raw  # fixture 跑管道
+python -m src validate --asof YYYY-MM-DD
+python -m src backtest              # 回测 + 同花顺风格 rich 报告
+python -m src overfit --split-date YYYY-MM-DD
+python -m src paper --asof YYYY-MM-DD
+python -m src broker --action {status,emergency-stop,clear-stop}
+```
+
+## 边界
+
+V1 明确**不做**：
+- ❌ 机器学习预测涨跌
+- ❌ 分钟级 / 高频
+- ❌ 新闻、大模型选股
+- ❌ 10+ 因子混合
+- ❌ 自动实盘下单（broker 层只手动）
+- ❌ 财务因子
+- ❌ 融资融券 / 北交所 / ETF / 可转债
 
 ## 目录结构
 
 ```
 a_share_quant/
-├── README.md
-├── strategy_spec.md        # 策略规范（先读这个）
-├── requirements.txt        # 待第二阶段填写
-├── config/
-│   └── strategy.yaml       # 与 spec §7 对齐的配置
-├── data/
-│   ├── raw/                # 原始数据（不提交 Git）
-│   └── processed/          # 清洗后数据
+├── app.py                     # Web App 入口（streamlit run app.py）
+├── strategy_spec.md           # 唯一事实来源
+├── config/strategy.yaml       # 与 spec §7 对齐的配置
+├── requirements.txt
+├── Makefile
 ├── src/
-│   ├── data/               # 下载、清洗、验证
-│   ├── universe/           # 股票池
-│   ├── factors/            # 因子
-│   ├── strategy/           # 信号、组合
-│   ├── backtest/           # 回测引擎、撮合、成本
-│   ├── risk/               # 风控
-│   └── reports/            # 报告
-├── tests/
-├── logs/
-└── results/
+│   ├── __main__.py            # CLI 入口
+│   ├── config.py              # frozen dataclass 配置加载
+│   ├── data/                  # 下载/清洗/验证/字段契约
+│   ├── universe/              # 股票池
+│   ├── factors/               # 动量因子
+│   ├── strategy/              # 信号
+│   ├── backtest/              # 引擎/broker/cost/模拟盘
+│   ├── broker/                # 实盘框架（V1 手动模式）
+│   ├── risk/                  # 风控
+│   └── reports/               # 报告（performance/rich/overfit）
+└── tests/                     # 145 项
 ```
-
-## 推进顺序
-
-严格按 `strategy_spec.md` 末尾的 14 阶段推进。当前**只完成第一阶段**，尚未写代码。
-
-## 阶段目标回顾
-
-| 阶段 | 状态 | 产物 |
-|---|---|---|
-| 1. 边界 | ✅ 完成 | `strategy_spec.md` + `config/strategy.yaml` |
-| 2. 环境 | ✅ 完成 | `.venv` + `requirements.txt` + Jupyter kernel + 4 项冒烟测试通过 |
-| 3. 项目骨架 | ✅ 完成 | `src/` 各包 `__init__.py` + `data/schema.py` + `config.py` + `python -m src` 端到端通过 + 10 项测试 |
-| 4. 数据 | ✅ 代码完成 | `downloader.py` + `cleaner.py` + 11 项管道测试通过；实际拉全量需联网 |
-| 4. 数据 | ⏳ 待办 | 选数据源、写 `downloader.py` |
-| 5. 数据验证 | ⏳ 待办 | `validator.py` + `data_quality_report.csv` |
-| 6. 股票池 | ⏳ 待办 | `universe/stock_pool.py` |
-| 7. 简单策略 | ⏳ 待办 | `factors/momentum.py` + `strategy/signal.py` |
-| 8. 订单 | ⏳ 待办 | `backtest/broker.py` + 状态机 |
-| 9. 回测引擎 | ⏳ 待办 | `backtest/engine.py` |
-| 10. 风控 | ⏳ 待办 | `risk/controls.py` |
-| 11. 报告 | ⏳ 待办 | `reports/performance.py` |
-| 12. 过拟合测试 | ⏳ 待办 | 参数敏感性 + 样本外 |
-| 13. 模拟盘 | ⏳ 待办 | 每日定时任务 |
-| 14. 实盘 | ⏳ 待办 | 券商接口 + 人工确认 |

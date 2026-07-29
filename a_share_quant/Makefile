@@ -1,4 +1,4 @@
-.PHONY: help venv install lock test clean notebook download clean-data self-test
+.PHONY: help venv install lock test clean notebook download clean-data self-test backtest overfit validate paper broker app
 
 PYTHON ?= python3
 VENV   ?= .venv
@@ -11,9 +11,12 @@ help:
 	@echo "  make lock        导出当前已装包到 requirements.lock.txt"
 	@echo "  make test        跑 pytest"
 	@echo "  make notebook    启动 JupyterLab（已注册 a_share_quant kernel）"
+	@echo "  make app         启动 Streamlit Web App（同花顺风格）"
 	@echo "  make download    阶段 4：从 baostock 拉原始数据（需联网）"
 	@echo "  make clean-data  阶段 4：raw → processed"
 	@echo "  make self-test   阶段 4：用 fixture 跑完 download+clean 管道（不联网）"
+	@echo "  make backtest    阶段 9+11：端到端回测 + rich 报告"
+	@echo "  make overfit     阶段 12：过拟合测试（需要先 self-test）"
 	@echo "  make clean       清理缓存（不动数据）"
 
 $(VENV)/bin/python:
@@ -33,6 +36,9 @@ test: venv
 
 notebook: venv
 	$(VENV)/bin/jupyter lab
+
+app: venv
+	$(VENV)/bin/streamlit run app.py
 
 download: venv
 	$(VENV)/bin/python -m src download
