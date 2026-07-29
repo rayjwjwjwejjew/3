@@ -107,7 +107,7 @@ def build_candidate_universe(
 
     # 取 T 日 bars（每个 code 当日是否停牌、ST）
     today_bars = bars[bars[COL_DATE] == asof].copy()
-    today_bars[COL_CODE] = today_bars[COL_CODE].astype(str)
+    # code is Categorical (set by engine); isin(set[str]) works directly
     # 只看仍在 active 集合里的 code
     today_bars = today_bars[today_bars[COL_CODE].isin(active_codes)]
 
@@ -119,7 +119,7 @@ def build_candidate_universe(
 
     # 5) 过去 20 日均成交额 ≥ 阈值（spec §3.2 第 4 条）
     # 性能：bars 已按 [code, date] 排序 → mask 切片保留顺序
-    bars_active = bars[bars[COL_CODE].astype(str).isin(active_codes)]
+    bars_active = bars[bars[COL_CODE].isin(active_codes)]
     # 关键：先按 date 截一次；bars 已按 [code, date] 排序，mask 保留顺序
     recent = bars_active[bars_active[COL_DATE] <= asof]
     # 用 cumcount 反向序号代替 groupby.tail，更快（pandas 内部不复制 last-N group）

@@ -41,8 +41,10 @@ def _make_bars(n_stocks=300, n_days=300, seed=2026):
 def test_run_backtest_finishes_under_10s():
     """300 股 × 300 天的回测应在 10s 内完成。
 
-    之前基线 ~6.9s；优化目标 < 4s。当前 ~3.3s。
-    阈值设为 10s 是"宽松"——CI 慢机器也能过，但显著回退会失败。
+    优化历史：
+    - 初始：500×500 = 6.9s
+    - 优化后：500×500 = 2.7s（2.6x 加速）
+    - 当前阈值：300×300 < 10s（基线，留出 CI 慢机器的余量）
     """
     clear_momentum_cache()
     bars = _make_bars(n_stocks=300, n_days=300)
@@ -57,6 +59,26 @@ def test_run_backtest_finishes_under_10s():
     run_backtest(bars, sb, cal, initial_cash=10_000_000.0)
     elapsed = time.time() - t0
     assert elapsed < 10.0, f"backtest took {elapsed:.2f}s, expected < 10s"
+
+
+def test_run_backtest_800x800_finishes_under_20s():
+    """800 股 × 800 天应在 20s 内。
+
+    当前实测：~9.3s。阈值 20s 给 CI 慢机器留余量。
+    """
+    clear_momentum_cache()
+    bars = _make_bars(n_stocks=800, n_days=800, seed=2027)
+    sb = pd.DataFrame({
+        COL_CODE: bars[COL_CODE].unique(),
+        "list_date": pd.to_datetime("1999-01-01"),
+        "delist_date": pd.NaT,
+    })
+    cal = pd.DataFrame({COL_DATE: pd.bdate_range("2019-01-02", periods=800), "is_trading_day": True})
+
+    t0 = time.time()
+    run_backtest(bars, sb, cal, initial_cash=10_000_000.0)
+    elapsed = time.time() - t0
+    assert elapsed < 20.0, f"800x800 backtest took {elapsed:.2f}s, expected < 20s"
 
 
 def test_momentum_cached_repeat_call_is_fast():

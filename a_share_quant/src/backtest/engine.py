@@ -206,6 +206,11 @@ def run_backtest(
         bars_sorted._asq_sorted_cache = _bars_cache_key  # type: ignore[attr-defined]
         bars = bars_sorted
 
+    # 性能：预热 momentum 缓存（首次调仓日的 compute_momentum 全段预计算一次）
+    # 否则 generate_target_weights 第一次调用会一次性算 1.27s
+    from src.factors.momentum import compute_momentum
+    compute_momentum(bars, lookback=lookback, skip=skip)
+
     # 性能：按 date 一次性分组，避免日循环里反复 xs()
     bars_by_date: dict[pd.Timestamp, pd.DataFrame] = {}
     if not bars.empty:
