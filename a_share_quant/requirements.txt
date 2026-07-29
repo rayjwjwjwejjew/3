@@ -18,6 +18,10 @@ matplotlib==3.9.0
 jupyter==1.0.0
 ipykernel==6.29.4
 
+# 同花顺风格终端报告
+rich==13.7.1
+textual==0.72.0
+
 # 测试
 pytest==8.2.2
 pytest-cov==5.0.0

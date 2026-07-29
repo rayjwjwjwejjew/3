@@ -131,7 +131,6 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     nav.to_csv(out_path)
 
-    # 报告
     report = build_report(nav, result["orders"], result.get("daily_logs"))
     report_path = out_path.parent / "report.json"
     import json
@@ -143,7 +142,46 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
     print(f"NAV written to: {out_path}")
     print(f"Report written to: {report_path}")
     print()
-    print(report.pretty())
+
+    if args.no_rich:
+        print(report.pretty())
+    else:
+        try:
+            from src.reports.rich_report import render_report as render_rich
+            render_rich(report, nav, daily_logs=result.get("daily_logs"))
+        except Exception as e:
+            print(f"[rich 报告渲染失败: {e}; fallback to text]")
+            print(report.pretty())
+    return 0
+
+
+def _cmd_report(args: argparse.Namespace) -> int:
+    """从已有 nav.csv 渲染 rich 报告（无需重跑回测）。"""
+    import pandas as pd
+    from pathlib import Path
+    from src.reports.performance import build_report
+    nav_path = Path(args.nav)
+    if not nav_path.exists():
+        print(f"nav file not found: {nav_path}", file=sys.stderr)
+        return 2
+    nav = pd.read_csv(nav_path, index_col=0, parse_dates=True)
+    # 尝试从同名 .json 读 orders；没有就空
+    orders_path = nav_path.parent / "orders.json"
+    if orders_path.exists():
+        import json
+        with orders_path.open() as f:
+            orders_data = json.load(f)
+        # V1 简化：直接用 build_report 接受空 orders 即可
+        orders = []
+    else:
+        orders = []
+    report = build_report(nav, orders)
+    try:
+        from src.reports.rich_report import render_report as render_rich
+        render_rich(report, nav)
+    except Exception as e:
+        print(f"[rich 报告渲染失败: {e}; fallback to text]")
+        print(report.pretty())
     return 0
 
 
@@ -341,6 +379,12 @@ def build_parser() -> argparse.ArgumentParser:
     pb = sub.add_parser("backtest", help="run backtest on processed/ data")
     pb.add_argument("--initial-cash", type=float, default=1_000_000.0)
     pb.add_argument("--out", default="results/nav.csv", help="output NAV csv path")
+    pb.add_argument("--no-rich", action="store_true",
+                    help="skip rich report, print plain text only")
+
+    # report (从 nav.csv 单独渲染)
+    pr = sub.add_parser("report", help="render rich report from existing nav.csv")
+    pr.add_argument("--nav", default="results/nav.csv", help="path to nav.csv")
 
     # overfit
     po = sub.add_parser("overfit", help="run overfitting / robustness tests")
@@ -378,6 +422,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_validate(args)
     if args.cmd == "backtest":
         return _cmd_backtest(args)
+    if args.cmd == "report":
+        return _cmd_report(args)
     if args.cmd == "overfit":
         return _cmd_overfit(args)
     if args.cmd == "paper":
