@@ -40,14 +40,16 @@ class Order:
     created_at: datetime = field(default_factory=datetime.now)
     filled_at: datetime | None = None
     cash_flow: float = 0.0  # 实际现金流（正=现金流出=买入，负=现金流入=卖出）
+    cost_total: float = 0.0  # 累计费用（佣金+印花税+过户费）
+    cost_detail: dict = field(default_factory=dict)  # {'commission': x, 'stamp_tax': y, 'transfer_fee': z}
 
     def submit(self) -> None:
         if self.status != ORDER_CREATED:
             raise RuntimeError(f"cannot submit order in status {self.status}")
         self.status = ORDER_SUBMITTED
 
-    def fill(self, price: float) -> None:
-        """全部成交。"""
+    def fill(self, price: float, cost_total: float = 0.0, cost_detail: dict | None = None) -> None:
+        """全部成交。cost_total/cost_detail 由调用方（engine）从 cost 模块算好传入。"""
         if self.status not in (ORDER_SUBMITTED, ORDER_PARTIALLY_FILLED):
             raise RuntimeError(f"cannot fill order in status {self.status}")
         self.filled_shares = self.shares
@@ -60,6 +62,8 @@ class Order:
             self.cash_flow = self.shares * price
         else:
             self.cash_flow = 0.0
+        self.cost_total = float(cost_total)
+        self.cost_detail = dict(cost_detail or {})
         self.status = ORDER_FILLED
 
     def reject(self, reason: str) -> None:

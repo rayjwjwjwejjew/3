@@ -208,13 +208,22 @@ def run_backtest(
                 reason = _check_tradable(order, row)
                 if reason is None and row is not None:
                     px = float(row[COL_OPEN]) * (1 + cfg.execution.slippage_bps / 10000)
-                    order.fill(px)
-                    # 现金 + 持仓
+                    # 计算成本
+                    cost = calc_cost(
+                        code, order.side, order.shares * px,
+                        cfg.cost.commission_rate, cfg.cost.commission_min,
+                        cfg.cost.stamp_tax_rate, cfg.cost.transfer_fee_rate,
+                    )
+                    order.fill(px, cost_total=cost.total,
+                               cost_detail={"commission": cost.commission,
+                                            "stamp_tax": cost.stamp_tax,
+                                            "transfer_fee": cost.transfer_fee})
+                    # 现金 + 持仓（成本从现金再扣一次）
                     if order.side == "BUY":
-                        portfolio.cash += order.cash_flow
+                        portfolio.cash += order.cash_flow - cost.total
                         portfolio.positions[code] = portfolio.positions.get(code, 0) + order.filled_shares
                     elif order.side == "SELL":
-                        portfolio.cash += order.cash_flow
+                        portfolio.cash += order.cash_flow - cost.total
                         new = portfolio.positions.get(code, 0) - order.filled_shares
                         if new <= 0:
                             portfolio.positions.pop(code, None)

@@ -106,18 +106,19 @@ def _cmd_validate(args: argparse.Namespace) -> int:
 
 
 def _cmd_backtest(args: argparse.Namespace) -> int:
-    """阶段 9：端到端回测，输出 NAV csv。"""
+    """阶段 9 + 11：端到端回测 + 报告。"""
     from pathlib import Path
     import pandas as pd
     from src.data.cleaner import PROC_BARS, PROC_STOCK_BASIC, PROC_TRADE_CALENDAR
     from src.backtest.engine import run_backtest
+    from src.reports.performance import build_report
 
     bars_p = PROC_BARS() if callable(PROC_BARS) else PROC_BARS
     sb_p = PROC_STOCK_BASIC() if callable(PROC_STOCK_BASIC) else PROC_STOCK_BASIC
     cal_p = PROC_TRADE_CALENDAR() if callable(PROC_TRADE_CALENDAR) else PROC_TRADE_CALENDAR
 
     if not bars_p.exists():
-        print(f"bars not found: {bars_p}\n请先跑 make self-test 或 make clean-data", file=sys.stderr)
+        print(f"bars not found: {bars_p}\n请先跑 make self-test --keep-raw 或 make clean-data", file=sys.stderr)
         return 2
     bars = pd.read_parquet(bars_p)
     sb = pd.read_parquet(sb_p) if sb_p.exists() else pd.DataFrame()
@@ -129,15 +130,20 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     nav.to_csv(out_path)
-    n_filled = sum(1 for o in result["orders"] if o.status == "FILLED")
-    n_rej = sum(1 for o in result["orders"] if o.status == "REJECTED")
-    n_rebal = sum(1 for log in result["daily_logs"] if log.is_rebalance)
-    print(f"rebalances: {n_rebal}; orders: {len(result['orders'])} (filled={n_filled}, rejected={n_rej})")
-    print(f"start NAV: {nav['nav'].iloc[0]:,.2f}; end NAV: {nav['nav'].iloc[-1]:,.2f}")
-    ret = (nav["nav"].iloc[-1] / nav["nav"].iloc[0] - 1) * 100
-    max_dd = ((nav["nav"] / nav["nav"].cummax()) - 1).min() * 100
-    print(f"return: {ret:.2f}%; max DD: {max_dd:.2f}%")
+
+    # 报告
+    report = build_report(nav, result["orders"], result.get("daily_logs"))
+    report_path = out_path.parent / "report.json"
+    import json
+    with report_path.open("w") as f:
+        json.dump(report.to_dict(), f, indent=2, default=str)
+
+    print(f"rebalances: {sum(1 for log in result['daily_logs'] if log.is_rebalance)}")
+    print(f"orders: {len(result['orders'])} (filled={report.filled_trades}, rejected={report.rejected_trades})")
     print(f"NAV written to: {out_path}")
+    print(f"Report written to: {report_path}")
+    print()
+    print(report.pretty())
     return 0
 
 
