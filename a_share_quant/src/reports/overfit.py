@@ -71,7 +71,7 @@ def run_in_out_sample(
     """按 split_date 切两段：is / oos。"""
     split = pd.Timestamp(split_date)
     cal = trade_calendar.copy()
-    cal[pd.to_datetime(cal["date"])] = pd.to_datetime(cal["date"])
+    cal["date"] = pd.to_datetime(cal["date"])
     is_cal = cal[pd.to_datetime(cal["date"]) < split]
     oos_cal = cal[pd.to_datetime(cal["date"]) >= split]
 

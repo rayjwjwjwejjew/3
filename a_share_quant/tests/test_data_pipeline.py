@@ -57,6 +57,57 @@ def test_build_fixture_creates_files():
     assert downloader.RAW_TRADE_CALENDAR.exists()
 
 
+def test_normalize_baostock_tradestatus_column():
+    """真实 baostock 原始列名 `tradestatus` 必须正确映射为停牌状态。"""
+    from src.data.downloader import _normalize_bar_frame
+
+    raw = pd.DataFrame({
+        "date": ["2024-01-02", "2024-01-03"],
+        "open": [10.0, 10.1], "high": [10.2, 10.3],
+        "low": [9.9, 10.0], "close": [10.1, 10.2],
+        "volume": [1000, 1000], "amount": [10000, 10000],
+        "adjustflag": ["2", "2"], "tradestatus": ["0", "1"],
+        "isST": ["0", "1"],
+    })
+
+    normalized = _normalize_bar_frame(raw, code="600000")
+
+    BARS.validate(normalized)
+    assert normalized[COL_SUSPENDED].tolist() == [True, False]
+    assert normalized[COL_ST].tolist() == [False, True]
+
+
+def test_download_bars_all_reuses_one_baostock_session(monkeypatch):
+    """批量下载只登录一次，避免全市场下载被逐股登录放大。"""
+    from src.data import downloader
+
+    client = object()
+    seen_clients = []
+    monkeypatch.setattr(downloader, "_bs_login", lambda: client)
+    monkeypatch.setattr(downloader, "_bs_logout", lambda value: seen_clients.append(value))
+    monkeypatch.setattr(
+        downloader,
+        "download_bars_for_code",
+        lambda code, dr, *, client: seen_clients.append(client) or pd.DataFrame(),
+    )
+
+    downloader.download_bars_all(["sh.600000", "sh.600004"], downloader.DownloadRange("2025-01-01", "2025-01-31"), sleep=0)
+
+    assert seen_clients == [client, client, client]
+
+
+def test_select_active_equity_codes_excludes_indices_and_inactive_symbols():
+    from src.data.downloader import select_active_equity_codes
+
+    basic = pd.DataFrame({
+        "code": ["sh.600000", "sh.000001", "sh.600001"],
+        "type": ["1", "2", "1"],
+        "status": ["1", "1", "0"],
+    })
+
+    assert select_active_equity_codes(basic) == ["sh.600000"]
+
+
 def test_clean_bars_schema_and_count():
     build_fixture()
     df = clean_bars()

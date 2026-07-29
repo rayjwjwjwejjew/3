@@ -20,7 +20,7 @@ import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import pandas as pd
 
@@ -37,7 +37,6 @@ from src.data.schema import (
     COL_OPEN,
     COL_ST,
     COL_SUSPENDED,
-    COL_TRADE_STATUS,
     COL_VOL,
 )
 from src.config import DATA_RAW
@@ -123,6 +122,19 @@ def download_stock_basic() -> pd.DataFrame:
         _bs_logout(bs)
 
 
+def select_active_equity_codes(stock_basic: pd.DataFrame) -> list[str]:
+    """从 baostock 股票列表中只选择在市的普通股票，排除指数等非股票代码。"""
+    required = {COL_CODE, "type", "status"}
+    missing = required - set(stock_basic.columns)
+    if missing:
+        raise ValueError(f"stock_basic missing columns: {sorted(missing)}")
+    eligible = stock_basic[
+        (stock_basic["type"].astype(str) == "1")
+        & (stock_basic["status"].astype(str) == "1")
+    ]
+    return eligible[COL_CODE].astype(str).tolist()
+
+
 # ===== 交易日历 =====
 def download_trade_calendar(start: str, end: str) -> pd.DataFrame:
     """下载区间内每日是否交易日。
@@ -149,7 +161,12 @@ def download_trade_calendar(start: str, end: str) -> pd.DataFrame:
 
 
 # ===== 日线 =====
-def download_bars_for_code(code: str, dr: DownloadRange) -> pd.DataFrame:
+def download_bars_for_code(
+    code: str,
+    dr: DownloadRange,
+    *,
+    client: Any | None = None,
+) -> pd.DataFrame:
     """下载单只股票指定区间的日线（前复权）。
 
     baostock 字段：date, open, high, low, close, preclose, volume,
@@ -158,7 +175,8 @@ def download_bars_for_code(code: str, dr: DownloadRange) -> pd.DataFrame:
     V1 标准化为 14 个最小列（其余字段丢弃以保持数据干净）。
     """
     _ensure_dirs()
-    bs = _bs_login()
+    bs = client or _bs_login()
+    owns_session = client is None
     try:
         rs = bs.query_history_k_data_plus(
             code,
@@ -177,23 +195,28 @@ def download_bars_for_code(code: str, dr: DownloadRange) -> pd.DataFrame:
         df.to_parquet(out_path, index=False)
         return df
     finally:
-        _bs_logout(bs)
+        if owns_session:
+            _bs_logout(bs)
 
 
 def download_bars_all(codes: Iterable[str], dr: DownloadRange, sleep: float = 0.1) -> pd.DataFrame:
     """批量下载多只股票日线。sleep 是礼貌性延时，避免 baostock 限流。"""
     pieces = []
-    for i, code in enumerate(codes):
-        try:
-            df = download_bars_for_code(code, dr)
-            if not df.empty:
-                pieces.append(df)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("download %s failed: %s", code, e)
-        if sleep > 0:
-            time.sleep(sleep)
-        if (i + 1) % 500 == 0:
-            logger.info("downloaded %d / %d stocks", i + 1, len(list(codes)) if isinstance(codes, list) else "?")
+    bs = _bs_login()
+    try:
+        for i, code in enumerate(codes):
+            try:
+                df = download_bars_for_code(code, dr, client=bs)
+                if not df.empty:
+                    pieces.append(df)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("download %s failed: %s", code, e)
+            if sleep > 0:
+                time.sleep(sleep)
+            if (i + 1) % 500 == 0:
+                logger.info("downloaded %d / %d stocks", i + 1, len(codes) if isinstance(codes, list) else "?")
+    finally:
+        _bs_logout(bs)
     if not pieces:
         return pd.DataFrame()
     return pd.concat(pieces, ignore_index=True)
@@ -217,7 +240,9 @@ def _normalize_bar_frame(df: pd.DataFrame, code: str) -> pd.DataFrame:
     df[COL_ADJ_FACTOR] = 1.0
 
     # 停牌：tradestatus '0'=停牌, '1'=正常
-    df[COL_SUSPENDED] = df[COL_TRADE_STATUS].map({"0": True, "1": False}).fillna(False)
+    # `tradestatus` 是 baostock 原始响应的列名；COL_TRADE_STATUS 是项目内
+    # 语义别名，不能直接用于尚未标准化的原始 DataFrame。
+    df[COL_SUSPENDED] = df["tradestatus"].map({"0": True, "1": False}).fillna(False)
 
     # ST：isST 字段 '0'/'1' → bool
     df[COL_ST] = (df["isST"].astype(str) == "1")

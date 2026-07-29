@@ -48,7 +48,7 @@ def _gen(codes, n, start="2022-01-04", seed=2026):
 
 
 # ===== 单项测试 =====
-def run_in_out_sample_runs():
+def test_run_in_out_sample_runs():
     bars, sb, cal = _gen(["600000", "600001", "600002", "600003", "600004"], n=500)
     s = run_in_out_sample(bars, sb, cal, split_date="2023-06-01")
     assert isinstance(s, OverfitSummary)
@@ -57,21 +57,21 @@ def run_in_out_sample_runs():
     assert any(r.label == "OOS" for r in s.results)
 
 
-def run_rebalance_frequency_runs():
+def test_run_rebalance_frequency_runs():
     bars, sb, cal = _gen(["600000", "600001", "600002", "600003", "600004"], n=400)
     s = run_rebalance_frequency(bars, sb, cal, freqs=(5, 10, 20))
     assert len(s.results) == 3
     assert {r.params.get("rebalance_every") for r in s.results} == {5, 10, 20}
 
 
-def run_lookback_sensitivity_runs():
+def test_run_lookback_sensitivity_runs():
     bars, sb, cal = _gen(["600000", "600001", "600002", "600003", "600004"], n=400)
     s = run_lookback_sensitivity(bars, sb, cal, lookbacks=(110, 120, 130))
     assert len(s.results) == 3
     assert {r.params.get("lookback") for r in s.results} == {110, 120, 130}
 
 
-def run_cost_stress_doubles_costs():
+def test_run_cost_stress_doubles_costs():
     """成本 ×2 时换手率相同但 cost_ratio 应翻倍。"""
     bars, sb, cal = _gen(["600000", "600001", "600002", "600003", "600004"], n=300)
     s = run_cost_stress(bars, sb, cal, multipliers=(1.0, 2.0))
@@ -81,14 +81,14 @@ def run_cost_stress_doubles_costs():
     assert stress.report.cost_ratio >= base.report.cost_ratio * 1.5
 
 
-def run_remove_best_year_runs():
+def test_run_remove_best_year_runs():
     bars, sb, cal = _gen(["600000", "600001", "600002", "600003", "600004"], n=500)
     s = run_remove_best_year(bars, sb, cal)
     # 至少有 base 段，可能有 excl 段
     assert any(r.label == "base" for r in s.results)
 
 
-def run_rolling_windows_runs():
+def test_run_rolling_windows_runs():
     bars, sb, cal = _gen(["600000", "600001", "600002", "600003", "600004"], n=800)
     s = run_rolling_windows(bars, sb, cal, window_years=2, step_years=1)
     # 至少 1 段

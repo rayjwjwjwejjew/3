@@ -54,6 +54,7 @@ def _cmd_download(args: argparse.Namespace) -> int:
         download_stock_basic,
         download_trade_calendar,
         DownloadRange,
+        select_active_equity_codes,
     )
 
     cfg = load_config()
@@ -75,7 +76,7 @@ def _cmd_download(args: argparse.Namespace) -> int:
     if args.codes:
         codes = [c.strip() for c in args.codes.split(",") if c.strip()]
     else:
-        codes = sb[COL_CODE].astype(str).tolist()
+        codes = select_active_equity_codes(sb)
     print(f"downloading bars for {len(codes)} codes...")
     bars = download_bars_all(codes, dr)
     print(f"  -> {len(bars)} bar rows")

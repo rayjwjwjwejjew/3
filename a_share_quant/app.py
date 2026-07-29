@@ -22,60 +22,11 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import streamlit as st
-
-PROJECT_ROOT = Path(__file__).resolve().parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-
-# ===== 页面配置 =====
-st.set_page_config(
-    page_title="A-Share Quant V1",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-
-# ===== 同花顺风格 CSS =====
-st.markdown("""
-<style>
-.pos { color: #ef4444; font-weight: 600; }
-.neg { color: #10b981; font-weight: 600; }
-.neu { color: #9ca3af; }
-.kpi-card {
-    background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-    padding: 20px 24px;
-    border-radius: 10px;
-    border: 1px solid #334155;
-    color: #f1f5f9;
-}
-.kpi-label {
-    color: #94a3b8;
-    font-size: 12px;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    margin-bottom: 8px;
-}
-.kpi-value { color: #f8fafc; font-size: 32px; font-weight: 700; line-height: 1.2; }
-.kpi-sub { color: #64748b; font-size: 13px; margin-top: 6px; }
-.section-title {
-    color: #1e293b;
-    font-size: 18px;
-    font-weight: 600;
-    border-left: 4px solid #ef4444;
-    padding-left: 12px;
-    margin: 24px 0 12px 0;
-}
-</style>
-""", unsafe_allow_html=True)
-
 
 # ===== 数据层 =====
 from src.factors.momentum import clear_momentum_cache
@@ -86,9 +37,22 @@ from src.data.schema import (
     COL_LIMIT_DOWN, COL_LIMIT_UP, COL_LOW, COL_OPEN, COL_HIGH, COL_CLOSE,
     COL_VOL, COL_SUSPENDED, COL_ST,
 )
-from src.data.benchmark.benchmarks import make_equal_weight_benchmark, excess_return
+from src.data.benchmark.benchmarks import make_equal_weight_benchmark
 from src.webapp.data_loader import has_real_data, sample_real_data
-from src.webapp.charts import nav_chart, kline_chart, benchmark_bar, yearly_bar_compare, export_to_png
+from src.webapp.charts import nav_chart, kline_chart, export_to_png
+from src.webapp.theme import apply_theme, render_app_header
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+# ===== 页面配置 =====
+st.set_page_config(
+    page_title="A-Share Quant V1",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+apply_theme(st)
 
 
 # ===== 数据生成 =====
@@ -156,7 +120,7 @@ def _kpi_card(label: str, value: str, sub: str = "", color_class: str = "neu") -
 def run_backtest_cached(
     n_stocks: int, n_days: int, initial_cash: float,
     rebalance_every: int, lookback: int, skip: int, top_k: int,
-    seed: int, use_real: bool,
+    seed: int, use_real: bool, cost_multiplier: float = 1.0,
 ) -> dict:
     clear_momentum_cache()
     if use_real:
@@ -171,7 +135,7 @@ def run_backtest_cached(
     return run_backtest(
         bars, sb, cal, initial_cash=initial_cash,
         rebalance_every=rebalance_every, lookback=lookback,
-        skip=skip, top_k=top_k,
+        skip=skip, top_k=top_k, cost_multiplier=cost_multiplier,
     )
 
 
@@ -464,12 +428,11 @@ def page_overfit(params):
     rows = []
     for m, label in [(1.0, "正常"), (2.0, "×2")]:
         try:
-            clear_momentum_cache()
-            bars = make_synthetic_bars(n_stocks, n_days, seed=params["seed"])
-            sb = make_stock_basic(list(bars[COL_CODE].unique()))
-            cal = make_calendar(bars[COL_DATE].unique())
-            r = run_backtest(bars, sb, cal, initial_cash=params["initial_cash"],
-                            cost_multiplier=m)
+            r = run_backtest_cached(
+                n_stocks, n_days, params["initial_cash"],
+                params["rebalance_every"], params["lookback"], params["skip"], params["top_k"],
+                params["seed"], params["use_real"], cost_multiplier=m,
+            )
             rep = build_report(r["nav"], r["orders"], r.get("daily_logs"))
             rows.append({
                 "成本": label,
@@ -526,11 +489,9 @@ def page_broker():
 
 # ===== 主入口 =====
 def main():
-    st.title("📈 A-Share Quant V1")
-    st.caption("同花顺风格回测面板 · V1 演示")
-
     # 侧边栏
     params = render_sidebar()
+    render_app_header(st, real_data_available=has_real_data(), using_real_data=params["use_real"])
 
     # 页面路由（st.tabs vs st.radio）
     page = st.sidebar.radio("📑 页面", [
