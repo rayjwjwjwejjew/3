@@ -102,6 +102,19 @@ V1 现在的基准是"等权 60 只"（已隐含跑赢 60 只），仍然 -17% �
 
 **H4 优先**（最便宜，可能直接解开 H1-H3 的疑问）：
 
+直接用项目里现成的一键脚本（推荐）：
+
+```bash
+python -m src.research.fetch_benchmark \
+    --start 2025-01-01 --end 2026-07-29 \
+    --strategy-return -0.1727 \
+    --out results/benchmarks.csv
+```
+
+会同时拉 4 个主流基准（沪深 300 / 中证 500 / 创业板指 / 上证 50），算总收益、年化、最大回撤、夏普，并给出策略 alpha = 策略总收益 - 基准总收益。
+
+或者手写（5 行）：
+
 ```python
 import baostock as bs
 import pandas as pd
@@ -118,6 +131,8 @@ ret = df["close"].iloc[-1] / df["close"].iloc[0] - 1
 print(f"沪深 300 同期收益: {ret:.2%}")
 # 策略 alpha = -17.27% - ret
 ```
+
+脚本和单元测试见 `src/research/fetch_benchmark.py` + `tests/test_fetch_benchmark.py`（13 个测试，stub 模式不需要联网）。
 
 **H3 次之**（要 `results/orders.csv` 还在）：
 
