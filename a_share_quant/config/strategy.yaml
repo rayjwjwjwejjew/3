@@ -1,0 +1,45 @@
+# A 股中期动量月频策略 V1 配置
+# 本文件是 strategy_spec.md §7 的可机读版本。
+# 任何修改请同步更新 strategy_spec.md。
+
+universe:
+  start_date: 2008-01-01
+  end_date: null                # null = 最新
+  min_listing_days: 60
+  min_avg_amount_20d: 100_000_000   # 20 日均成交额下限（元）
+  include_board: [main, gem, star]  # 主板 / 创业板 / 科创板
+
+factor:
+  name: momentum
+  lookback: 120                 # 因子回看窗口（交易日）
+  skip: 5                       # 跳过最近 N 日
+  tie_break_seed: 42
+
+signal:
+  rebalance_every: 20           # 调仓频率（交易日）
+  check_every: 10               # 信号检查频率（交易日）
+  top_k: 10
+  min_holdings: 5               # 不足则空仓
+
+execution:
+  price_basis: open_t_plus_1    # T+1 开盘价成交
+  lot_size: 100
+  min_cash_buffer_pct: 5        # 最低现金缓冲
+  slippage_bps: 5               # 单边滑点 5 bps
+
+cost:
+  commission_rate: 0.00025
+  commission_min: 5.0
+  stamp_tax_rate: 0.001         # 仅卖出
+  transfer_fee_rate: 0.00001    # 仅沪市
+
+risk:
+  TRADING_ENABLED: true
+  max_single_weight: 0.10
+  max_industry_weight: 0.30
+  max_holdings: 15
+  min_cash_pct: 0.05
+
+logging:
+  log_dir: logs/
+  result_dir: results/
