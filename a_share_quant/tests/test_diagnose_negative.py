@@ -59,8 +59,6 @@ def test_h1_cost_not_main_driver():
 
 def test_h2_turnover_above_expected():
     """H2: 单次调仓换手 36% 略高于预期 20%。"""
-    d = diagnose()
-    h2 = next(h for h in d.hypotheses if h.id == "H2")
     per_rebal = SAMPLE["annualized_turnover"] / SAMPLE["n_rebalances"]
     # 36% > 20% 预期,但 36% < 50% → 部分成立
     assert 0.30 < per_rebal < 0.50

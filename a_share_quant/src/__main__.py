@@ -104,9 +104,12 @@ def _cmd_clean(args: argparse.Namespace) -> int:
 
 def _cmd_validate(args: argparse.Namespace) -> int:
     """阶段 5：对 processed/ 跑 8 项质量检查，生成报告 + assert_clean。"""
-    from src.data.validator import DataQualityError, validate_processed
+    from src.data.validator import DataQualityError, validate_processed, validate_processed_partitioned
     try:
-        df = validate_processed(asof_date=args.asof, report_path=args.report)
+        if args.partitioned:
+            df = validate_processed_partitioned(asof_date=args.asof, report_path=args.report)
+        else:
+            df = validate_processed(asof_date=args.asof, report_path=args.report)
     except DataQualityError as e:
         print(f"DATA QUALITY ERROR:\n{e}", file=sys.stderr)
         return 2
@@ -395,6 +398,11 @@ def build_parser() -> argparse.ArgumentParser:
     pv = sub.add_parser("validate", help="run data quality checks on processed/")
     pv.add_argument("--asof", required=True, help="as-of date YYYY-MM-DD")
     pv.add_argument("--report", default=None, help="override report path")
+    pv.add_argument(
+        "--partitioned",
+        action="store_true",
+        help="validate processed/bars_by_code without loading full-market bars into memory",
+    )
 
     # backtest
     pb = sub.add_parser("backtest", help="run backtest on processed/ data")

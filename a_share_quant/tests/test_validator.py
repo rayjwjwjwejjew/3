@@ -8,7 +8,6 @@ import pandas as pd
 import pytest
 
 from src.data.schema import (
-    BARS,
     COL_ADJ_FACTOR,
     COL_AMOUNT,
     COL_CLOSE,
@@ -26,7 +25,6 @@ from src.data.schema import (
 from src.data.validator import (
     DataQualityError,
     DataValidator,
-    ValidationFinding,
     check_adj_factor_jump,
     check_calendar_continuity,
     check_limit_price_consistency,
@@ -35,6 +33,7 @@ from src.data.validator import (
     check_no_future_data,
     check_price_positive,
     check_volume_non_negative,
+    validate_processed_partitioned,
 )
 
 
@@ -262,3 +261,49 @@ def test_validator_empty_bars_calendar_only():
     # 没有 ERROR 才会通过
     v.assert_clean()
     assert isinstance(df, pd.DataFrame)
+
+
+def test_validate_processed_partitioned_writes_report(tmp_path, monkeypatch):
+    proc = tmp_path / "processed"
+    bars_dir = proc / "bars_by_code"
+    bars_dir.mkdir(parents=True)
+    monkeypatch.setattr("src.data.cleaner.DATA_PROCESSED", proc)
+
+    bars = _make_bars([
+        {COL_DATE: "2024-01-02", COL_CLOSE: 10.00, COL_LIMIT_UP: pd.NA, COL_LIMIT_DOWN: pd.NA},
+        {COL_DATE: "2024-01-03", COL_CLOSE: 10.50, COL_LIMIT_UP: 11.00, COL_LIMIT_DOWN: 9.00},
+    ])
+    bars.to_parquet(bars_dir / "600000.parquet", index=False)
+    _make_basic([{COL_CODE: "600000", "list_date": pd.to_datetime("1999-11-10")}]).to_parquet(
+        proc / "stock_basic.parquet",
+        index=False,
+    )
+    _make_calendar(["2024-01-02", "2024-01-03"]).to_parquet(proc / "trade_calendar.parquet", index=False)
+
+    report_path = tmp_path / "partition_report.csv"
+    df = validate_processed_partitioned(asof_date=date(2024, 1, 31), report_path=report_path)
+
+    assert df.empty
+    assert report_path.exists()
+
+
+def test_validate_processed_partitioned_raises_on_partition_error(tmp_path, monkeypatch):
+    proc = tmp_path / "processed"
+    bars_dir = proc / "bars_by_code"
+    bars_dir.mkdir(parents=True)
+    monkeypatch.setattr("src.data.cleaner.DATA_PROCESSED", proc)
+
+    _make_bars([{COL_DATE: "2024-01-02", COL_CLOSE: -1.0}]).to_parquet(
+        bars_dir / "600000.parquet",
+        index=False,
+    )
+    _make_basic([{COL_CODE: "600000", "list_date": pd.to_datetime("1999-11-10")}]).to_parquet(
+        proc / "stock_basic.parquet",
+        index=False,
+    )
+    _make_calendar(["2024-01-02"]).to_parquet(proc / "trade_calendar.parquet", index=False)
+
+    with pytest.raises(DataQualityError) as ei:
+        validate_processed_partitioned(asof_date=date(2024, 1, 31), report_path=tmp_path / "partition_report.csv")
+
+    assert "price_positive" in str(ei.value)

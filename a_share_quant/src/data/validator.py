@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date as _date
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -30,7 +29,6 @@ import pandas as pd
 from src.data.schema import (
     BARS,
     COL_ADJ_FACTOR,
-    COL_AMOUNT,
     COL_CLOSE,
     COL_CODE,
     COL_DATE,
@@ -39,10 +37,8 @@ from src.data.schema import (
     COL_LIMIT_UP,
     COL_LOW,
     COL_OPEN,
-    COL_ST,
     COL_VOL,
 )
-from src.data import downloader
 
 logger = logging.getLogger(__name__)
 
@@ -360,4 +356,72 @@ def validate_processed(asof_date, report_path: Path | None = None) -> pd.DataFra
     df = v.run_all()
     v.write_report()
     v.assert_clean()
+    return df
+
+
+def validate_processed_partitioned(asof_date, report_path: Path | None = None) -> pd.DataFrame:
+    """Validate processed/bars_by_code without loading the full market into memory."""
+    from src.data.cleaner import (
+        PROC_BARS_BY_CODE,
+        PROC_STOCK_BASIC,
+        PROC_TRADE_CALENDAR,
+    )
+
+    bars_dir = PROC_BARS_BY_CODE() if callable(PROC_BARS_BY_CODE) else PROC_BARS_BY_CODE
+    sb_path = PROC_STOCK_BASIC() if callable(PROC_STOCK_BASIC) else PROC_STOCK_BASIC
+    tc_path = PROC_TRADE_CALENDAR() if callable(PROC_TRADE_CALENDAR) else PROC_TRADE_CALENDAR
+
+    if not bars_dir.exists():
+        raise FileNotFoundError(f"partitioned bars not found: {bars_dir}（请先跑 python -m src clean --partitioned）")
+
+    bar_files = sorted(bars_dir.glob("*.parquet"))
+    if not bar_files:
+        raise FileNotFoundError(f"no partitioned bars parquet files found in: {bars_dir}")
+
+    sb = pd.read_parquet(sb_path) if sb_path.exists() else pd.DataFrame(columns=[COL_CODE, "list_date", "delist_date"])
+    tc = pd.read_parquet(tc_path) if tc_path.exists() else pd.DataFrame(columns=[COL_DATE, "is_trading_day"])
+
+    report_path = Path(report_path) if report_path else DataValidator.DEFAULT_REPORT_PATH
+    findings: list[ValidationFinding] = []
+    for path in bar_files:
+        try:
+            bars = pd.read_parquet(path)
+            v = DataValidator(bars, sb, tc.iloc[0:0].copy(), asof_date=asof_date, report_path=report_path)
+            v._run(lambda: check_no_duplicate_keys(v.bars))  # noqa: SLF001
+            v._run(lambda: check_price_positive(v.bars))  # noqa: SLF001
+            v._run(lambda: check_volume_non_negative(v.bars))  # noqa: SLF001
+            v._run(lambda: check_adj_factor_jump(v.bars))  # noqa: SLF001
+            v._run(lambda: check_no_data_before_listing(v.bars, v.stock_basic))  # noqa: SLF001
+            v._run(lambda: check_no_future_data(v.bars, v.asof_date))  # noqa: SLF001
+            v._run(lambda: check_limit_price_consistency(v.bars))  # noqa: SLF001
+            findings.extend(
+                ValidationFinding(
+                    check=finding.check,
+                    severity=finding.severity,
+                    scope=f"{path.name}:{finding.scope}",
+                    detail=finding.detail,
+                    n_affected=finding.n_affected,
+                )
+                for finding in v.findings
+            )
+        except Exception as e:  # noqa: BLE001
+            findings.append(ValidationFinding(
+                check="partition_read",
+                severity="ERROR",
+                scope=str(path),
+                detail=f"{type(e).__name__}: {e}",
+                n_affected=0,
+            ))
+
+    findings.extend(check_calendar_continuity(tc))
+    df = pd.DataFrame([f.to_row() for f in findings], columns=["check", "severity", "scope", "detail", "n_affected"])
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(report_path, index=False)
+    errors = [f for f in findings if f.severity == "ERROR"]
+    if errors:
+        msg = "\n".join(f"  [{e.check}] {e.scope}: {e.detail}" for e in errors)
+        raise DataQualityError(
+            f"partitioned data validation found {len(errors)} ERROR(s):\n{msg}\n"
+            f"see report: {report_path}"
+        )
     return df

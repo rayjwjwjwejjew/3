@@ -12,9 +12,7 @@
 from __future__ import annotations
 
 import io
-import sys
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import datetime, timedelta
 
 import pandas as pd
 import pytest
@@ -22,7 +20,6 @@ import pytest
 from src.research.fetch_benchmark import (
     BenchmarkResult,
     _annualized_return,
-    _annualized_vol,
     _max_drawdown,
     _sharpe,
     alpha,
@@ -111,7 +108,9 @@ def test_compute_benchmark_uses_fetcher():
 
 
 def test_compute_benchmark_empty_raises():
-    fetcher = lambda c, s, e: pd.Series(dtype=float)
+    def fetcher(c, s, e):
+        return pd.Series(dtype=float)
+
     with pytest.raises(RuntimeError, match="empty data"):
         compute_benchmark("sh.000300", "沪深 300", "2025-01-01", "2025-12-31", fetcher=fetcher)
 

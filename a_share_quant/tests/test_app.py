@@ -11,7 +11,6 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import numpy as np
 import pandas as pd
