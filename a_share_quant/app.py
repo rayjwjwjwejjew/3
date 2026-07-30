@@ -147,9 +147,9 @@ def render_sidebar():
         st.markdown('<div class="sidebar-copy">修改参数后，页面会重新计算当前研究实验。</div>', unsafe_allow_html=True)
 
         use_real = st.checkbox(
-            "📊 使用真实数据（data/processed/bars.parquet）",
+            "📊 使用真实数据（已导入行情）",
             value=False,
-            help="需先 `make self-test --keep-raw` 或 `make clean-data` 落数据",
+            help="需先执行 `python -m src clean --partitioned` 或生成 bars.parquet",
             disabled=not has_real_data(),
         )
         if not has_real_data():

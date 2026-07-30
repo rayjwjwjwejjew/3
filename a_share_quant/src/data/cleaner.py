@@ -30,7 +30,6 @@ from src.data.schema import (
     COL_LIMIT_DOWN,
     COL_LIMIT_UP,
     COL_LOW,
-    COL_NAME,
     COL_OPEN,
     COL_ST,
     COL_SUSPENDED,
@@ -44,6 +43,11 @@ logger = logging.getLogger(__name__)
 # ===== 输出路径（每次访问时求值，方便测试 monkeypatch）=====
 def PROC_BARS() -> Path:
     return DATA_PROCESSED / "bars.parquet"
+
+
+def PROC_BARS_BY_CODE() -> Path:
+    """分股票 processed 数据集；适用于内存有限的全市场导入。"""
+    return DATA_PROCESSED / "bars_by_code"
 
 def PROC_STOCK_BASIC() -> Path:
     return DATA_PROCESSED / "stock_basic.parquet"
@@ -187,6 +191,60 @@ def clean_bars() -> pd.DataFrame:
     df.to_parquet(PROC_BARS(), index=False)
     logger.info("cleaned %d bar rows → %s", len(df), PROC_BARS())
     return df
+
+
+def clean_bars_partitioned() -> dict[str, int]:
+    """逐股票清洗并写入分区文件，不在内存中拼接全市场 bars。
+
+    每个 raw 文件只对应一个 code，因此去重、排序和涨跌停计算都可在单文件
+    完成。返回汇总而非全量 DataFrame，供低内存导入命令报告进度。
+    """
+    raw_dir = downloader.RAW_BARS_DIR
+    if not raw_dir.exists():
+        raise FileNotFoundError(f"raw bars dir missing: {raw_dir}")
+    files = sorted(raw_dir.glob("*.parquet"))
+    out_dir = PROC_BARS_BY_CODE()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    written_files = 0
+    written_rows = 0
+    skipped_files = 0
+    for f in files:
+        try:
+            df = pd.read_parquet(f)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("skip unreadable %s: %s", f.name, e)
+            skipped_files += 1
+            continue
+        if df.empty:
+            skipped_files += 1
+            continue
+        df = _normalize_raw_frame(df, code=f.stem)
+        df = df.drop_duplicates(subset=[COL_CODE, COL_DATE], keep="last")
+        df = df.sort_values([COL_CODE, COL_DATE]).reset_index(drop=True)
+        df[COL_DATE] = pd.to_datetime(df[COL_DATE])
+        for c in (
+            COL_OPEN, COL_HIGH, COL_LOW, COL_CLOSE, COL_ADJ_CLOSE,
+            COL_VOL, COL_AMOUNT, COL_ADJ_FACTOR, COL_LIMIT_UP, COL_LIMIT_DOWN,
+        ):
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df = add_limit_prices(df)
+        BARS.validate(df)
+        df.to_parquet(out_dir / f.name, index=False)
+        written_files += 1
+        written_rows += len(df)
+
+    logger.info(
+        "partitioned %d bar rows across %d files → %s",
+        written_rows,
+        written_files,
+        out_dir,
+    )
+    return {
+        "files": written_files,
+        "rows": written_rows,
+        "skipped": skipped_files,
+    }
 
 
 # ===== 清洗：股票列表 =====

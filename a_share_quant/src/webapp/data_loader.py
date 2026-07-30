@@ -5,21 +5,19 @@ Web App 优先使用真实数据；无数据时回退到合成数据 + UI 警告
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
-
 import pandas as pd
 
 from src.config import DATA_PROCESSED
 
 PROC_BARS_PATH = DATA_PROCESSED / "bars.parquet"
+PROC_BARS_BY_CODE_DIR = DATA_PROCESSED / "bars_by_code"
 PROC_STOCK_BASIC_PATH = DATA_PROCESSED / "stock_basic.parquet"
 PROC_TRADE_CALENDAR_PATH = DATA_PROCESSED / "trade_calendar.parquet"
 
 
 def has_real_data() -> bool:
     """检查项目目录下是否有真实 baostock 拉取的数据。"""
-    return PROC_BARS_PATH.exists()
+    return PROC_BARS_PATH.exists() or any(PROC_BARS_BY_CODE_DIR.glob("*.parquet"))
 
 
 def load_real_bars() -> pd.DataFrame | None:
@@ -60,14 +58,22 @@ def sample_real_data(
 
     用随机种子确保结果可复现（Streamlit cache）。
     """
-    bars = load_real_bars()
-    if bars is None or bars.empty:
-        return None
     rng = np_random(seed)
-    codes = bars["code"].unique()
-    if len(codes) > n_stocks:
-        codes = rng.choice(codes, size=n_stocks, replace=False)
-    sub = bars[bars["code"].isin(codes)].copy()
+    if PROC_BARS_PATH.exists():
+        bars = load_real_bars()
+        if bars is None or bars.empty:
+            return None
+        codes = bars["code"].unique()
+        if len(codes) > n_stocks:
+            codes = rng.choice(codes, size=n_stocks, replace=False)
+        sub = bars[bars["code"].isin(codes)].copy()
+    else:
+        files = sorted(PROC_BARS_BY_CODE_DIR.glob("*.parquet"))
+        if not files:
+            return None
+        chosen = rng.choice(files, size=min(n_stocks, len(files)), replace=False)
+        pieces = [pd.read_parquet(path) for path in chosen]
+        sub = pd.concat(pieces, ignore_index=True)
     sub["date"] = pd.to_datetime(sub["date"])
     last_date = sub["date"].max()
     cutoff = last_date - pd.Timedelta(days=int(n_days * 1.5))

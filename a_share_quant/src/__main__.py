@@ -15,11 +15,10 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from pathlib import Path
 
 from src import __version__
 from src.config import CONFIG_PATH, load_config
-from src.data import BARS, COL_CODE, COL_DATE, make_empty_bars
+from src.data import BARS, make_empty_bars
 
 
 def _setup_logging(verbose: bool) -> None:
@@ -55,6 +54,7 @@ def _cmd_download(args: argparse.Namespace) -> int:
         download_trade_calendar,
         DownloadRange,
         select_active_equity_codes,
+        select_equity_codes,
     )
 
     cfg = load_config()
@@ -65,7 +65,7 @@ def _cmd_download(args: argparse.Namespace) -> int:
         end = args.end_date
     dr = DownloadRange(start_date=args.start_date or cfg.universe.start_date, end_date=end)
 
-    print(f"downloading stock_basic...")
+    print("downloading stock_basic...")
     sb = download_stock_basic()
     print(f"  -> {len(sb)} stocks")
 
@@ -75,17 +75,27 @@ def _cmd_download(args: argparse.Namespace) -> int:
 
     if args.codes:
         codes = [c.strip() for c in args.codes.split(",") if c.strip()]
+    elif args.include_inactive:
+        codes = select_equity_codes(sb, include_inactive=True)
     else:
         codes = select_active_equity_codes(sb)
     print(f"downloading bars for {len(codes)} codes...")
-    bars = download_bars_all(codes, dr)
-    print(f"  -> {len(bars)} bar rows")
+    rows = download_bars_all(codes, dr, collect=False)
+    print(f"  -> {rows} bar rows")
     return 0
 
 
-def _cmd_clean(_args: argparse.Namespace) -> int:
+def _cmd_clean(args: argparse.Namespace) -> int:
     """阶段 4 clean 子命令。raw → processed。"""
-    from src.data.cleaner import run_all
+    from src.data.cleaner import clean_bars_partitioned, clean_stock_basic, clean_trade_calendar, run_all
+    if args.partitioned:
+        bars = clean_bars_partitioned()
+        stock_basic = clean_stock_basic()
+        calendar = clean_trade_calendar()
+        print(f"  bars_by_code: {bars['rows']} rows / {bars['files']} files (skipped={bars['skipped']})")
+        print(f"  stock_basic: {len(stock_basic)} rows")
+        print(f"  trade_calendar: {len(calendar)} rows")
+        return 0
     out = run_all()
     for k, v in out.items():
         print(f"  {k}: {len(v)} rows")
@@ -171,7 +181,7 @@ def _cmd_report(args: argparse.Namespace) -> int:
     if orders_path.exists():
         import json
         with orders_path.open() as f:
-            orders_data = json.load(f)
+            json.load(f)
         # V1 简化：直接用 build_report 接受空 orders 即可
         orders = []
     else:
@@ -362,9 +372,19 @@ def build_parser() -> argparse.ArgumentParser:
     pd_.add_argument("--start-date", default=None)
     pd_.add_argument("--end-date", default=None)
     pd_.add_argument("--codes", default=None, help="comma-separated; default = all A-shares")
+    pd_.add_argument(
+        "--include-inactive",
+        action="store_true",
+        help="include delisted ordinary shares for historical coverage",
+    )
 
     # clean
-    sub.add_parser("clean", help="clean raw -> processed")
+    pc = sub.add_parser("clean", help="clean raw -> processed")
+    pc.add_argument(
+        "--partitioned",
+        action="store_true",
+        help="write one processed parquet per code for low-memory full-market imports",
+    )
 
     # self-test
     pst = sub.add_parser("self-test", help="run the pipeline against local fixtures (no network)")

@@ -122,17 +122,23 @@ def download_stock_basic() -> pd.DataFrame:
         _bs_logout(bs)
 
 
-def select_active_equity_codes(stock_basic: pd.DataFrame) -> list[str]:
-    """从 baostock 股票列表中只选择在市的普通股票，排除指数等非股票代码。"""
-    required = {COL_CODE, "type", "status"}
+def select_equity_codes(stock_basic: pd.DataFrame, *, include_inactive: bool = False) -> list[str]:
+    """选择普通股票；可选地保留已退市代码以覆盖历史研究区间。"""
+    required = {COL_CODE, "type"}
     missing = required - set(stock_basic.columns)
     if missing:
         raise ValueError(f"stock_basic missing columns: {sorted(missing)}")
-    eligible = stock_basic[
-        (stock_basic["type"].astype(str) == "1")
-        & (stock_basic["status"].astype(str) == "1")
-    ]
+    eligible = stock_basic[stock_basic["type"].astype(str) == "1"]
+    if not include_inactive:
+        if "status" not in stock_basic.columns:
+            raise ValueError("stock_basic missing columns: ['status']")
+        eligible = eligible[eligible["status"].astype(str) == "1"]
     return eligible[COL_CODE].astype(str).tolist()
+
+
+def select_active_equity_codes(stock_basic: pd.DataFrame) -> list[str]:
+    """兼容旧调用：只选择当前在市的普通股票。"""
+    return select_equity_codes(stock_basic, include_inactive=False)
 
 
 # ===== 交易日历 =====
@@ -199,16 +205,29 @@ def download_bars_for_code(
             _bs_logout(bs)
 
 
-def download_bars_all(codes: Iterable[str], dr: DownloadRange, sleep: float = 0.1) -> pd.DataFrame:
-    """批量下载多只股票日线。sleep 是礼貌性延时，避免 baostock 限流。"""
-    pieces = []
+def download_bars_all(
+    codes: Iterable[str],
+    dr: DownloadRange,
+    sleep: float = 0.1,
+    *,
+    collect: bool = True,
+) -> pd.DataFrame | int:
+    """批量下载日线。
+
+    ``collect=False`` 仅统计已落盘行数，适用于全市场下载，避免把所有
+    DataFrame 同时保留在内存中。
+    """
+    pieces: list[pd.DataFrame] = []
+    downloaded_rows = 0
     bs = _bs_login()
     try:
         for i, code in enumerate(codes):
             try:
                 df = download_bars_for_code(code, dr, client=bs)
                 if not df.empty:
-                    pieces.append(df)
+                    downloaded_rows += len(df)
+                    if collect:
+                        pieces.append(df)
             except Exception as e:  # noqa: BLE001
                 logger.warning("download %s failed: %s", code, e)
             if sleep > 0:
@@ -217,6 +236,8 @@ def download_bars_all(codes: Iterable[str], dr: DownloadRange, sleep: float = 0.
                 logger.info("downloaded %d / %d stocks", i + 1, len(codes) if isinstance(codes, list) else "?")
     finally:
         _bs_logout(bs)
+    if not collect:
+        return downloaded_rows
     if not pieces:
         return pd.DataFrame()
     return pd.concat(pieces, ignore_index=True)

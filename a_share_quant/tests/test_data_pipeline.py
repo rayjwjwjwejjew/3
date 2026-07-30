@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-import importlib
-from pathlib import Path
-
 import pandas as pd
 import pytest
 
-from src.config import DATA_PROCESSED, DATA_RAW
 from src.data.cleaner import (
-    add_limit_prices,
     clean_bars,
+    clean_bars_partitioned,
     clean_stock_basic,
     clean_trade_calendar,
     run_all,
@@ -96,6 +92,29 @@ def test_download_bars_all_reuses_one_baostock_session(monkeypatch):
     assert seen_clients == [client, client, client]
 
 
+def test_download_bars_all_can_stream_rows_without_collecting_frames(monkeypatch):
+    """全市场下载仅需写分股文件，不能在内存里累计所有 bars。"""
+    from src.data import downloader
+
+    client = object()
+    monkeypatch.setattr(downloader, "_bs_login", lambda: client)
+    monkeypatch.setattr(downloader, "_bs_logout", lambda _: None)
+    monkeypatch.setattr(
+        downloader,
+        "download_bars_for_code",
+        lambda code, dr, *, client: pd.DataFrame({"code": [code, code]}),
+    )
+
+    rows = downloader.download_bars_all(
+        ["sh.600000", "sh.600004"],
+        downloader.DownloadRange("2025-01-01", "2025-01-31"),
+        sleep=0,
+        collect=False,
+    )
+
+    assert rows == 4
+
+
 def test_select_active_equity_codes_excludes_indices_and_inactive_symbols():
     from src.data.downloader import select_active_equity_codes
 
@@ -108,6 +127,18 @@ def test_select_active_equity_codes_excludes_indices_and_inactive_symbols():
     assert select_active_equity_codes(basic) == ["sh.600000"]
 
 
+def test_select_equity_codes_can_include_inactive_history():
+    from src.data.downloader import select_equity_codes
+
+    basic = pd.DataFrame({
+        "code": ["sh.600000", "sh.000001", "sh.600001"],
+        "type": ["1", "2", "1"],
+        "status": ["1", "1", "0"],
+    })
+
+    assert select_equity_codes(basic, include_inactive=True) == ["sh.600000", "sh.600001"]
+
+
 def test_clean_bars_schema_and_count():
     build_fixture()
     df = clean_bars()
@@ -115,6 +146,20 @@ def test_clean_bars_schema_and_count():
     # 3 股 × 30 日 = 90 行
     assert len(df) == 90
     assert set(df[COL_CODE].unique()) == {"600000", "688001", "000001"}
+
+
+def test_clean_bars_partitioned_keeps_each_code_independent():
+    from src.data.cleaner import PROC_BARS_BY_CODE
+
+    build_fixture()
+    summary = clean_bars_partitioned()
+    out_dir = PROC_BARS_BY_CODE()
+    files = sorted(out_dir.glob("*.parquet"))
+
+    assert summary == {"files": 3, "rows": 90, "skipped": 0}
+    assert len(files) == 3
+    for path in files:
+        BARS.validate(pd.read_parquet(path))
 
 
 def test_clean_bars_limit_prices_main_board():
