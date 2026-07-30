@@ -65,6 +65,12 @@ make app
 **数据源**：
 - 默认：合成数据（不联网）
 - 真实：`data/processed/bars.parquet` 存在时自动用真实 baostock 数据（需先 `make self-test --keep-raw` 或本机 `make download`）
+- 全市场低内存导入：`data/processed/bars_by_code/` 存在时 Web App 按选中股票读取分区数据。
+
+真实数据和实验结果默认只留在本机。先运行 `make snapshot-data`，它会为当前
+`processed/` 数据写入逐文件 SHA-256 快照；每次 CLI 回测/稳健性实验会自动写入
+`results/run_manifests/`，记录数据快照、代码提交、配置哈希、参数、指标与制品路径。
+这些文件与行情数据均被 Git 忽略，研究状态始终为 `RESEARCH_ONLY`。
 
 **A 股惯例**：红涨绿跌、▲/▼ Unicode、HEAVY box 标题、ROUNDED 区块、暗色渐变 KPI 卡片。
 
@@ -76,6 +82,8 @@ python -m src download              # 拉数据（需联网）
 python -m src clean                 # raw → processed
 python -m src self-test --keep-raw  # fixture 跑管道
 python -m src validate --asof YYYY-MM-DD
+python -m src snapshot-data          # 冻结本地 processed 数据快照
+python -m src snapshot-data --verify data/metadata/data-xxxx.json
 python -m src backtest              # 回测 + 同花顺风格 rich 报告
 python -m src overfit --split-date YYYY-MM-DD
 python -m src paper --asof YYYY-MM-DD

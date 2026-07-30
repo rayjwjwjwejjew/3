@@ -119,6 +119,28 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_snapshot_data(args: argparse.Namespace) -> int:
+    """冻结 processed 数据集，并可校验既有快照。"""
+    from pathlib import Path
+    from src.research.lineage import default_snapshot_dir, verify_data_snapshot, write_data_snapshot
+
+    if args.verify:
+        ok, message = verify_data_snapshot(Path(args.verify))
+        print(message)
+        return 0 if ok else 2
+
+    snapshot, path = write_data_snapshot(
+        output_dir=Path(args.out) if args.out else default_snapshot_dir(),
+        source=args.source,
+    )
+    coverage = snapshot["coverage"]
+    print(f"snapshot: {snapshot['snapshot_id']}")
+    print(f"layout: {snapshot['layout']}; files: {len(snapshot['files'])}; bytes: {snapshot['total_bytes']}")
+    print(f"coverage: {coverage['calendar_start']} -> {coverage['calendar_end']} ({coverage['calendar_rows']} days)")
+    print(f"written to: {path}")
+    return 0
+
+
 def _cmd_backtest(args: argparse.Namespace) -> int:
     """阶段 9 + 11：端到端回测 + 报告。"""
     from pathlib import Path
@@ -126,6 +148,7 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
     from src.data.cleaner import PROC_BARS, PROC_STOCK_BASIC, PROC_TRADE_CALENDAR
     from src.backtest.engine import run_backtest
     from src.reports.performance import build_report
+    from src.research.lineage import default_run_manifest_dir, default_snapshot_dir, load_data_snapshot, verify_data_snapshot, write_data_snapshot, write_run_manifest
 
     bars_p = PROC_BARS() if callable(PROC_BARS) else PROC_BARS
     sb_p = PROC_STOCK_BASIC() if callable(PROC_STOCK_BASIC) else PROC_STOCK_BASIC
@@ -137,6 +160,22 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
     bars = pd.read_parquet(bars_p)
     sb = pd.read_parquet(sb_p) if sb_p.exists() else pd.DataFrame()
     cal = pd.read_parquet(cal_p) if cal_p.exists() else pd.DataFrame()
+
+    if args.snapshot:
+        snapshot_path = Path(args.snapshot)
+        verified, message = verify_data_snapshot(snapshot_path)
+        if not verified:
+            print(f"DATA SNAPSHOT ERROR: {message}", file=sys.stderr)
+            return 2
+        snapshot = load_data_snapshot(snapshot_path)
+        if snapshot["layout"] != "monolithic":
+            print("DATA SNAPSHOT ERROR: backtest requires a monolithic bars.parquet snapshot", file=sys.stderr)
+            return 2
+    else:
+        snapshot, snapshot_path = write_data_snapshot(
+            output_dir=default_snapshot_dir(),
+            layout="monolithic",
+        )
 
     print(f"bars: {len(bars)} rows; stocks: {len(sb)}; cal: {len(cal)}")
     result = run_backtest(bars, sb, cal, initial_cash=args.initial_cash)
@@ -151,10 +190,28 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
     with report_path.open("w") as f:
         json.dump(report.to_dict(), f, indent=2, default=str)
 
+    manifest, manifest_path = write_run_manifest(
+        output_dir=Path(args.manifest_out) if args.manifest_out else default_run_manifest_dir(),
+        experiment_type="backtest",
+        snapshot=snapshot,
+        arguments={
+            "initial_cash": args.initial_cash,
+            "nav_output": str(out_path),
+            "rich_report": not args.no_rich,
+        },
+        metrics=report.to_dict(),
+        artifacts={
+            "nav": str(out_path),
+            "report": str(report_path),
+            "data_snapshot": str(snapshot_path),
+        },
+    )
+
     print(f"rebalances: {sum(1 for log in result['daily_logs'] if log.is_rebalance)}")
     print(f"orders: {len(result['orders'])} (filled={report.filled_trades}, rejected={report.rejected_trades})")
     print(f"NAV written to: {out_path}")
     print(f"Report written to: {report_path}")
+    print(f"Run manifest: {manifest_path} ({manifest['run_id']})")
     print()
 
     if args.no_rich:
@@ -205,6 +262,7 @@ def _cmd_overfit(args: argparse.Namespace) -> int:
     from pathlib import Path
     from src.data.cleaner import PROC_BARS, PROC_STOCK_BASIC, PROC_TRADE_CALENDAR
     from src.reports.overfit import run_all_overfit_tests
+    from src.research.lineage import default_run_manifest_dir, default_snapshot_dir, load_data_snapshot, verify_data_snapshot, write_data_snapshot, write_run_manifest
 
     bars_p = PROC_BARS() if callable(PROC_BARS) else PROC_BARS
     sb_p = PROC_STOCK_BASIC() if callable(PROC_STOCK_BASIC) else PROC_STOCK_BASIC
@@ -216,6 +274,22 @@ def _cmd_overfit(args: argparse.Namespace) -> int:
     bars = pd.read_parquet(bars_p)
     sb = pd.read_parquet(sb_p) if sb_p.exists() else pd.DataFrame()
     cal = pd.read_parquet(cal_p) if cal_p.exists() else pd.DataFrame()
+
+    if args.snapshot:
+        snapshot_path = Path(args.snapshot)
+        verified, message = verify_data_snapshot(snapshot_path)
+        if not verified:
+            print(f"DATA SNAPSHOT ERROR: {message}", file=sys.stderr)
+            return 2
+        snapshot = load_data_snapshot(snapshot_path)
+        if snapshot["layout"] != "monolithic":
+            print("DATA SNAPSHOT ERROR: overfit requires a monolithic bars.parquet snapshot", file=sys.stderr)
+            return 2
+    else:
+        snapshot, snapshot_path = write_data_snapshot(
+            output_dir=default_snapshot_dir(),
+            layout="monolithic",
+        )
 
     out = run_all_overfit_tests(bars, sb, cal, split_date=args.split_date)
     print("=" * 60)
@@ -234,7 +308,16 @@ def _cmd_overfit(args: argparse.Namespace) -> int:
                 row[k] = d.get(k)
             rows.append(row)
     pd.DataFrame(rows).to_csv(out_path, index=False)
+    manifest, manifest_path = write_run_manifest(
+        output_dir=Path(args.manifest_out) if args.manifest_out else default_run_manifest_dir(),
+        experiment_type="overfit",
+        snapshot=snapshot,
+        arguments={"split_date": args.split_date, "output": str(out_path)},
+        metrics={"test_groups": len(out), "result_rows": len(rows)},
+        artifacts={"overfit_csv": str(out_path), "data_snapshot": str(snapshot_path)},
+    )
     print(f"\n→ written to {out_path}")
+    print(f"Run manifest: {manifest_path} ({manifest['run_id']})")
     return 0
 
 
@@ -404,12 +487,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="validate processed/bars_by_code without loading full-market bars into memory",
     )
 
+    ps = sub.add_parser("snapshot-data", help="freeze processed data as a local content-hash manifest")
+    ps.add_argument("--out", default=None, help="snapshot directory (default: data/metadata)")
+    ps.add_argument("--source", default="baostock", help="declared source label stored in the snapshot")
+    ps.add_argument("--verify", default=None, help="verify an existing snapshot against current processed data")
+
     # backtest
     pb = sub.add_parser("backtest", help="run backtest on processed/ data")
     pb.add_argument("--initial-cash", type=float, default=1_000_000.0)
     pb.add_argument("--out", default="results/nav.csv", help="output NAV csv path")
     pb.add_argument("--no-rich", action="store_true",
                     help="skip rich report, print plain text only")
+    pb.add_argument("--snapshot", default=None, help="existing data snapshot JSON; default creates/reuses one")
+    pb.add_argument("--manifest-out", default=None, help="run manifest directory (default: results/run_manifests)")
 
     # report (从 nav.csv 单独渲染)
     pr = sub.add_parser("report", help="render rich report from existing nav.csv")
@@ -419,6 +509,8 @@ def build_parser() -> argparse.ArgumentParser:
     po = sub.add_parser("overfit", help="run overfitting / robustness tests")
     po.add_argument("--split-date", required=True, help="in-sample / out-of-sample split YYYY-MM-DD")
     po.add_argument("--out", default="results/overfit.csv", help="output CSV")
+    po.add_argument("--snapshot", default=None, help="existing data snapshot JSON; default creates/reuses one")
+    po.add_argument("--manifest-out", default=None, help="run manifest directory (default: results/run_manifests)")
 
     # paper
     pp = sub.add_parser("paper", help="run a single paper-trading day (idempotent)")
@@ -449,6 +541,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_self_test(args)
     if args.cmd == "validate":
         return _cmd_validate(args)
+    if args.cmd == "snapshot-data":
+        return _cmd_snapshot_data(args)
     if args.cmd == "backtest":
         return _cmd_backtest(args)
     if args.cmd == "report":

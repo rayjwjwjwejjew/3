@@ -1,4 +1,4 @@
-.PHONY: help venv install lock test clean notebook download clean-data self-test backtest overfit validate paper broker app
+.PHONY: help venv install lock test clean notebook download clean-data self-test backtest overfit validate snapshot-data paper broker app
 
 PYTHON ?= python3
 VENV   ?= .venv
@@ -17,6 +17,7 @@ help:
 	@echo "  make self-test   阶段 4：用 fixture 跑完 download+clean 管道（不联网）"
 	@echo "  make backtest    阶段 9+11：端到端回测 + rich 报告"
 	@echo "  make overfit     阶段 12：过拟合测试（需要先 self-test）"
+	@echo "  make snapshot-data 冻结 processed 数据内容哈希（本地，不提交数据）"
 	@echo "  make clean       清理缓存（不动数据）"
 
 $(VENV)/bin/python:
@@ -55,6 +56,9 @@ backtest: venv
 validate: venv
 	@if [ -z "$(ASOF)" ]; then echo "usage: make validate ASOF=YYYY-MM-DD"; exit 1; fi
 	$(VENV)/bin/python -m src validate --asof $(ASOF)
+
+snapshot-data: venv
+	$(VENV)/bin/python -m src snapshot-data
 
 clean:
 	find . -type d -name "__pycache__" -prune -exec rm -rf {} +

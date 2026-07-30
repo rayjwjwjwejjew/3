@@ -62,6 +62,7 @@ coverage.xml
 # raw 和 processed 数据不提交
 data/raw/
 data/processed/
+data/metadata/
 # 日志与回测中间产物
 logs/
 results/
