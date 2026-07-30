@@ -1,4 +1,4 @@
-.PHONY: help venv install lock test clean notebook download clean-data self-test backtest overfit validate snapshot-data paper broker app
+.PHONY: help venv install lock test clean notebook download clean-data self-test backtest backtest-partitioned overfit overfit-partitioned validate snapshot-data paper broker app
 
 PYTHON ?= python3
 VENV   ?= .venv
@@ -16,7 +16,9 @@ help:
 	@echo "  make clean-data  阶段 4：raw → processed"
 	@echo "  make self-test   阶段 4：用 fixture 跑完 download+clean 管道（不联网）"
 	@echo "  make backtest    阶段 9+11：端到端回测 + rich 报告"
+	@echo "  make backtest-partitioned 低内存全市场分区行情回测"
 	@echo "  make overfit     阶段 12：过拟合测试（需要先 self-test）"
+	@echo "  make overfit-partitioned 低内存全市场分区稳健性测试（需 SPLIT=YYYY-MM-DD）"
 	@echo "  make snapshot-data 冻结 processed 数据内容哈希（本地，不提交数据）"
 	@echo "  make clean       清理缓存（不动数据）"
 
@@ -53,9 +55,16 @@ self-test: venv
 backtest: venv
 	$(VENV)/bin/python -m src backtest --initial-cash 1000000 --out results/nav.csv
 
+backtest-partitioned: venv
+	$(VENV)/bin/python -m src backtest --partitioned --initial-cash 1000000 --out results/nav_partitioned.csv
+
 validate: venv
 	@if [ -z "$(ASOF)" ]; then echo "usage: make validate ASOF=YYYY-MM-DD"; exit 1; fi
 	$(VENV)/bin/python -m src validate --asof $(ASOF)
+
+overfit-partitioned: venv
+	@if [ -z "$(SPLIT)" ]; then echo "usage: make overfit-partitioned SPLIT=YYYY-MM-DD"; exit 1; fi
+	$(VENV)/bin/python -m src overfit --partitioned --split-date $(SPLIT) --out results/overfit_partitioned.csv
 
 snapshot-data: venv
 	$(VENV)/bin/python -m src snapshot-data

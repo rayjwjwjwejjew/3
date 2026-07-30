@@ -102,6 +102,19 @@ def _cmd_clean(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_repair_partitions(args: argparse.Namespace) -> int:
+    """按数据质量报告定点重建损坏的 processed 分区。"""
+    from pathlib import Path
+    from src.data.cleaner import repair_partitioned_bars
+
+    repaired = repair_partitioned_bars(Path(args.report))
+    print(
+        f"repaired partitions: {repaired['files']} files / {repaired['rows']} rows "
+        f"(skipped={repaired['skipped']})"
+    )
+    return 0
+
+
 def _cmd_validate(args: argparse.Namespace) -> int:
     """阶段 5：对 processed/ 跑 8 项质量检查，生成报告 + assert_clean。"""
     from src.data.validator import DataQualityError, validate_processed, validate_processed_partitioned
@@ -145,21 +158,32 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
     """阶段 9 + 11：端到端回测 + 报告。"""
     from pathlib import Path
     import pandas as pd
-    from src.data.cleaner import PROC_BARS, PROC_STOCK_BASIC, PROC_TRADE_CALENDAR
+    from src.data.cleaner import PROC_BARS, PROC_BARS_BY_CODE, PROC_STOCK_BASIC, PROC_TRADE_CALENDAR
     from src.backtest.engine import run_backtest
     from src.reports.performance import build_report
     from src.research.lineage import default_run_manifest_dir, default_snapshot_dir, load_data_snapshot, verify_data_snapshot, write_data_snapshot, write_run_manifest
 
     bars_p = PROC_BARS() if callable(PROC_BARS) else PROC_BARS
+    bars_by_code_p = PROC_BARS_BY_CODE() if callable(PROC_BARS_BY_CODE) else PROC_BARS_BY_CODE
     sb_p = PROC_STOCK_BASIC() if callable(PROC_STOCK_BASIC) else PROC_STOCK_BASIC
     cal_p = PROC_TRADE_CALENDAR() if callable(PROC_TRADE_CALENDAR) else PROC_TRADE_CALENDAR
 
-    if not bars_p.exists():
-        print(f"bars not found: {bars_p}\n请先跑 make self-test --keep-raw 或 make clean-data", file=sys.stderr)
+    use_partitioned = args.partitioned or (not bars_p.exists() and bars_by_code_p.exists())
+    if use_partitioned and not any(bars_by_code_p.glob("*.parquet")):
+        print(f"partitioned bars not found: {bars_by_code_p}", file=sys.stderr)
         return 2
-    bars = pd.read_parquet(bars_p)
+    if not use_partitioned and not bars_p.exists():
+        print(f"bars not found: {bars_p}\n请先跑 make self-test --keep-raw、make clean-data，或用分区行情", file=sys.stderr)
+        return 2
+    bars = pd.DataFrame() if use_partitioned else pd.read_parquet(bars_p)
     sb = pd.read_parquet(sb_p) if sb_p.exists() else pd.DataFrame()
     cal = pd.read_parquet(cal_p) if cal_p.exists() else pd.DataFrame()
+    if not use_partitioned:
+        if args.start_date:
+            cal = cal[pd.to_datetime(cal["date"]) >= pd.Timestamp(args.start_date)]
+        if args.end_date:
+            cal = cal[pd.to_datetime(cal["date"]) <= pd.Timestamp(args.end_date)]
+    layout = "partitioned_by_code" if use_partitioned else "monolithic"
 
     if args.snapshot:
         snapshot_path = Path(args.snapshot)
@@ -168,17 +192,32 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
             print(f"DATA SNAPSHOT ERROR: {message}", file=sys.stderr)
             return 2
         snapshot = load_data_snapshot(snapshot_path)
-        if snapshot["layout"] != "monolithic":
-            print("DATA SNAPSHOT ERROR: backtest requires a monolithic bars.parquet snapshot", file=sys.stderr)
+        if snapshot["layout"] != layout:
+            print(f"DATA SNAPSHOT ERROR: backtest requires a {layout} snapshot", file=sys.stderr)
             return 2
     else:
         snapshot, snapshot_path = write_data_snapshot(
             output_dir=default_snapshot_dir(),
-            layout="monolithic",
+            layout=layout,
         )
 
-    print(f"bars: {len(bars)} rows; stocks: {len(sb)}; cal: {len(cal)}")
-    result = run_backtest(bars, sb, cal, initial_cash=args.initial_cash)
+    if use_partitioned:
+        from src.backtest.partitioned import run_partitioned_backtest
+        result = run_partitioned_backtest(
+            bars_by_code_p,
+            sb,
+            cal,
+            initial_cash=args.initial_cash,
+            start_date=args.start_date,
+            end_date=args.end_date,
+        )
+        print(
+            f"partitioned bars: {bars_by_code_p}; stocks: {len(sb)}; cal: {len(cal)}; "
+            f"execution rows: {result['partitioned']['execution_rows']}"
+        )
+    else:
+        print(f"bars: {len(bars)} rows; stocks: {len(sb)}; cal: {len(cal)}")
+        result = run_backtest(bars, sb, cal, initial_cash=args.initial_cash)
     nav = result["nav"]
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -198,6 +237,9 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
             "initial_cash": args.initial_cash,
             "nav_output": str(out_path),
             "rich_report": not args.no_rich,
+            "data_layout": layout,
+            "start_date": args.start_date,
+            "end_date": args.end_date,
         },
         metrics=report.to_dict(),
         artifacts={
@@ -260,20 +302,31 @@ def _cmd_overfit(args: argparse.Namespace) -> int:
     """阶段 12：过拟合 / 稳健性测试。"""
     import pandas as pd
     from pathlib import Path
-    from src.data.cleaner import PROC_BARS, PROC_STOCK_BASIC, PROC_TRADE_CALENDAR
+    from src.data.cleaner import PROC_BARS, PROC_BARS_BY_CODE, PROC_STOCK_BASIC, PROC_TRADE_CALENDAR
     from src.reports.overfit import run_all_overfit_tests
     from src.research.lineage import default_run_manifest_dir, default_snapshot_dir, load_data_snapshot, verify_data_snapshot, write_data_snapshot, write_run_manifest
 
     bars_p = PROC_BARS() if callable(PROC_BARS) else PROC_BARS
+    bars_by_code_p = PROC_BARS_BY_CODE() if callable(PROC_BARS_BY_CODE) else PROC_BARS_BY_CODE
     sb_p = PROC_STOCK_BASIC() if callable(PROC_STOCK_BASIC) else PROC_STOCK_BASIC
     cal_p = PROC_TRADE_CALENDAR() if callable(PROC_TRADE_CALENDAR) else PROC_TRADE_CALENDAR
 
-    if not bars_p.exists():
+    use_partitioned = args.partitioned or (not bars_p.exists() and bars_by_code_p.exists())
+    if use_partitioned and not any(bars_by_code_p.glob("*.parquet")):
+        print(f"partitioned bars not found: {bars_by_code_p}", file=sys.stderr)
+        return 2
+    if not use_partitioned and not bars_p.exists():
         print(f"bars not found: {bars_p}", file=sys.stderr)
         return 2
-    bars = pd.read_parquet(bars_p)
+    bars = pd.DataFrame() if use_partitioned else pd.read_parquet(bars_p)
     sb = pd.read_parquet(sb_p) if sb_p.exists() else pd.DataFrame()
     cal = pd.read_parquet(cal_p) if cal_p.exists() else pd.DataFrame()
+    cal_history = cal.copy()
+    if args.start_date:
+        cal = cal[pd.to_datetime(cal["date"]) >= pd.Timestamp(args.start_date)]
+    if args.end_date:
+        cal = cal[pd.to_datetime(cal["date"]) <= pd.Timestamp(args.end_date)]
+    layout = "partitioned_by_code" if use_partitioned else "monolithic"
 
     if args.snapshot:
         snapshot_path = Path(args.snapshot)
@@ -282,16 +335,32 @@ def _cmd_overfit(args: argparse.Namespace) -> int:
             print(f"DATA SNAPSHOT ERROR: {message}", file=sys.stderr)
             return 2
         snapshot = load_data_snapshot(snapshot_path)
-        if snapshot["layout"] != "monolithic":
-            print("DATA SNAPSHOT ERROR: overfit requires a monolithic bars.parquet snapshot", file=sys.stderr)
+        if snapshot["layout"] != layout:
+            print(f"DATA SNAPSHOT ERROR: overfit requires a {layout} snapshot", file=sys.stderr)
             return 2
     else:
         snapshot, snapshot_path = write_data_snapshot(
             output_dir=default_snapshot_dir(),
-            layout="monolithic",
+            layout=layout,
         )
 
-    out = run_all_overfit_tests(bars, sb, cal, split_date=args.split_date)
+    if use_partitioned:
+        from src.backtest.partitioned import run_partitioned_backtest
+
+        def partitioned_runner(_bars, stock_basic, trade_calendar, **kwargs):
+            dates = pd.to_datetime(trade_calendar["date"])
+            return run_partitioned_backtest(
+                bars_by_code_p,
+                stock_basic,
+                cal_history,
+                start_date=str(dates.min().date()),
+                end_date=str(dates.max().date()),
+                **kwargs,
+            )
+
+        out = run_all_overfit_tests(bars, sb, cal, split_date=args.split_date, runner=partitioned_runner)
+    else:
+        out = run_all_overfit_tests(bars, sb, cal, split_date=args.split_date)
     print("=" * 60)
     for name, summary in out.items():
         print(f"\n── {name} ──")
@@ -312,7 +381,13 @@ def _cmd_overfit(args: argparse.Namespace) -> int:
         output_dir=Path(args.manifest_out) if args.manifest_out else default_run_manifest_dir(),
         experiment_type="overfit",
         snapshot=snapshot,
-        arguments={"split_date": args.split_date, "output": str(out_path)},
+        arguments={
+            "split_date": args.split_date,
+            "output": str(out_path),
+            "data_layout": layout,
+            "start_date": args.start_date,
+            "end_date": args.end_date,
+        },
         metrics={"test_groups": len(out), "result_rows": len(rows)},
         artifacts={"overfit_csv": str(out_path), "data_snapshot": str(snapshot_path)},
     )
@@ -472,6 +547,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="write one processed parquet per code for low-memory full-market imports",
     )
 
+    prp = sub.add_parser("repair-partitions", help="rebuild corrupted processed partitions from a quality report")
+    prp.add_argument("--report", required=True, help="validator CSV containing partition_read errors")
+
     # self-test
     pst = sub.add_parser("self-test", help="run the pipeline against local fixtures (no network)")
     pst.add_argument("--keep-raw", action="store_true",
@@ -500,6 +578,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="skip rich report, print plain text only")
     pb.add_argument("--snapshot", default=None, help="existing data snapshot JSON; default creates/reuses one")
     pb.add_argument("--manifest-out", default=None, help="run manifest directory (default: results/run_manifests)")
+    pb.add_argument("--partitioned", action="store_true", help="use processed/bars_by_code via low-memory DuckDB path")
+    pb.add_argument("--start-date", default=None, help="optional backtest start date YYYY-MM-DD")
+    pb.add_argument("--end-date", default=None, help="optional backtest end date YYYY-MM-DD")
 
     # report (从 nav.csv 单独渲染)
     pr = sub.add_parser("report", help="render rich report from existing nav.csv")
@@ -511,6 +592,9 @@ def build_parser() -> argparse.ArgumentParser:
     po.add_argument("--out", default="results/overfit.csv", help="output CSV")
     po.add_argument("--snapshot", default=None, help="existing data snapshot JSON; default creates/reuses one")
     po.add_argument("--manifest-out", default=None, help="run manifest directory (default: results/run_manifests)")
+    po.add_argument("--partitioned", action="store_true", help="use processed/bars_by_code via low-memory DuckDB path")
+    po.add_argument("--start-date", default=None, help="optional test start date YYYY-MM-DD")
+    po.add_argument("--end-date", default=None, help="optional test end date YYYY-MM-DD")
 
     # paper
     pp = sub.add_parser("paper", help="run a single paper-trading day (idempotent)")
@@ -537,6 +621,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_download(args)
     if args.cmd == "clean":
         return _cmd_clean(args)
+    if args.cmd == "repair-partitions":
+        return _cmd_repair_partitions(args)
     if args.cmd == "self-test":
         return _cmd_self_test(args)
     if args.cmd == "validate":

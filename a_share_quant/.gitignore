@@ -63,6 +63,7 @@ coverage.xml
 data/raw/
 data/processed/
 data/metadata/
+data/missing_raw_partitions.txt
 # 日志与回测中间产物
 logs/
 results/

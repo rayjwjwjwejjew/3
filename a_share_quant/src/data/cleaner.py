@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Iterable
 
 import pandas as pd
 
@@ -193,7 +194,7 @@ def clean_bars() -> pd.DataFrame:
     return df
 
 
-def clean_bars_partitioned() -> dict[str, int]:
+def clean_bars_partitioned(codes: Iterable[str] | None = None) -> dict[str, int]:
     """逐股票清洗并写入分区文件，不在内存中拼接全市场 bars。
 
     每个 raw 文件只对应一个 code，因此去重、排序和涨跌停计算都可在单文件
@@ -203,6 +204,12 @@ def clean_bars_partitioned() -> dict[str, int]:
     if not raw_dir.exists():
         raise FileNotFoundError(f"raw bars dir missing: {raw_dir}")
     files = sorted(raw_dir.glob("*.parquet"))
+    if codes is not None:
+        requested = {str(code) for code in codes}
+        files = [path for path in files if path.stem in requested]
+        missing = requested - {path.stem for path in files}
+        if missing:
+            raise FileNotFoundError(f"raw partitions missing: {sorted(missing)}")
     out_dir = PROC_BARS_BY_CODE()
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -230,7 +237,16 @@ def clean_bars_partitioned() -> dict[str, int]:
             df[c] = pd.to_numeric(df[c], errors="coerce")
         df = add_limit_prices(df)
         BARS.validate(df)
-        df.to_parquet(out_dir / f.name, index=False)
+        # 写到同目录的临时文件并立即复读，避免把半写入或不可读的分区当成成功。
+        # ``replace`` 在同一文件系统内是原子的，旧的有效分区不会被中间状态覆盖。
+        target = out_dir / f.name
+        temporary = out_dir / f".{f.name}.tmp"
+        try:
+            df.to_parquet(temporary, index=False)
+            pd.read_parquet(temporary)
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
         written_files += 1
         written_rows += len(df)
 
@@ -245,6 +261,39 @@ def clean_bars_partitioned() -> dict[str, int]:
         "rows": written_rows,
         "skipped": skipped_files,
     }
+
+
+def repair_partitioned_bars(report_path: Path) -> dict[str, int]:
+    """按 validator 的 ``partition_read`` 错误定点重建受损分区。
+
+    只接受当前 ``bars_by_code`` 目录内的文件路径，避免报告内容越界写入。
+    原始分区仍是权威输入；缺失或不可读 raw 文件会在重建统计中显式跳过。
+    """
+    report_path = Path(report_path)
+    if not report_path.exists():
+        raise FileNotFoundError(report_path)
+    report = pd.read_csv(report_path)
+    required = {"check", "severity", "scope"}
+    missing = required - set(report.columns)
+    if missing:
+        raise ValueError(f"quality report missing columns: {sorted(missing)}")
+    out_dir = PROC_BARS_BY_CODE().resolve()
+    bad = report[(report["check"] == "partition_read") & (report["severity"] == "ERROR")]
+    codes: set[str] = set()
+    for scope in bad["scope"].dropna().astype(str):
+        path = Path(scope).resolve()
+        if path.parent != out_dir or path.suffix != ".parquet":
+            raise ValueError(f"unsafe partition path in quality report: {scope}")
+        codes.add(path.stem)
+    if not codes:
+        return {"files": 0, "rows": 0, "skipped": 0}
+    repaired = clean_bars_partitioned(codes=codes)
+    if repaired["files"] != len(codes) or repaired["skipped"]:
+        raise RuntimeError(
+            "partition repair incomplete: "
+            f"expected={len(codes)}, repaired={repaired['files']}, skipped={repaired['skipped']}"
+        )
+    return repaired
 
 
 # ===== 清洗：股票列表 =====

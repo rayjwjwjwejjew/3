@@ -9,7 +9,6 @@ import time
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from src.data.schema import (
     COL_ADJ_CLOSE, COL_ADJ_FACTOR, COL_AMOUNT, COL_CLOSE, COL_CODE, COL_DATE,
@@ -18,7 +17,7 @@ from src.data.schema import (
 )
 from src.factors.momentum import clear_momentum_cache
 from src.backtest.engine import (
-    _compute_nav, _last_valid_close, _generate_orders, run_backtest, Portfolio, Order,
+    _compute_nav, _last_valid_close, _generate_orders, run_backtest, Portfolio,
 )
 
 
@@ -92,6 +91,19 @@ def test_last_valid_close_helper():
     assert px_skip < px  # 01-12 价格比 01-15 前的更早一天
 
 
+def test_last_valid_close_never_reads_future_price():
+    """估值日以前的持仓价格不能被未来高价污染。"""
+    bars = _make_bars(["600000"], n_days=20)
+    asof = pd.Timestamp("2024-01-15")
+    bars.loc[bars[COL_DATE] > asof, COL_CLOSE] = 999.0
+    today = bars[bars[COL_DATE] == asof].set_index(COL_CODE)
+
+    px = _last_valid_close("600000", today, all_bars=bars, asof_date=asof)
+
+    assert px is not None
+    assert px < 100.0
+
+
 # ===== §2.2 修：_compute_nav skip 参数真正生效 =====
 def test_nav_skip_uses_skip_days_ago():
     """skip 参数使 _last_valid_close 跳过最近 skip 日。"""
@@ -145,7 +157,6 @@ def test_pending_orders_invariant_protected():
     r = run_backtest(bars, sb, cal, initial_cash=1_000_000.0, rebalance_every=20)
     # pending_orders 一定为空（每调仓日都立即撮合）
     # 订单列表里同 date 没有同 code 重复
-    from collections import Counter
     for log in r["daily_logs"]:
         if log.is_rebalance:
             # 调仓日 order 应该从 0 开始

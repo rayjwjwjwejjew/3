@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -33,11 +32,8 @@ from src.data.schema import (
     COL_LIMIT_UP,
     COL_OPEN,
     COL_SUSPENDED,
-    COL_VOL,
-    make_empty_bars,
 )
 from src.strategy.signal import generate_target_weights
-from src.universe.stock_pool import build_tradable_universe
 from src.backtest.broker import Order
 from src.backtest.costs import calc_cost
 
@@ -177,6 +173,7 @@ def run_backtest(
     skip: int | None = None,
     top_k: int | None = None,
     cost_multiplier: float = 1.0,
+    precomputed_target_weights: dict[pd.Timestamp, dict[str, float]] | None = None,
 ) -> dict[str, Any]:
     """跑完整回测，返回 {nav_series, daily_logs, orders, portfolio}。
 
@@ -197,9 +194,6 @@ def run_backtest(
     if trading_days.empty:
         raise ValueError("trade_calendar has no trading days")
 
-    # 性能：bars 按 (code, date) MultiIndex 索引（一次性）
-    bars_idx = bars.set_index([COL_CODE, COL_DATE]).sort_index() if not bars.empty else pd.DataFrame()
-
     # 性能：按 (code, date) 排序 + Categorical，groupby 复用 codes 字典
     _bars_cache_key = id(bars)
     if not bars.empty and not getattr(bars, "_asq_sorted_cache", None) == _bars_cache_key:
@@ -209,10 +203,11 @@ def run_backtest(
         bars_sorted._asq_sorted_cache = _bars_cache_key  # type: ignore[attr-defined]
         bars = bars_sorted
 
-    # 性能：预热 momentum 缓存（首次调仓日的 compute_momentum 全段预计算一次）
-    # 否则 generate_target_weights 第一次调用会一次性算 1.27s
-    from src.factors.momentum import compute_momentum
-    compute_momentum(bars, lookback=lookback, skip=skip)
+    if precomputed_target_weights is None:
+        # 性能：预热 momentum 缓存（首次调仓日的 compute_momentum 全段预计算一次）
+        # 否则 generate_target_weights 第一次调用会一次性算 1.27s
+        from src.factors.momentum import compute_momentum
+        compute_momentum(bars, lookback=lookback, skip=skip)
 
     # 性能：按 date 一次性分组，避免日循环里反复 xs()
     bars_by_date: dict[pd.Timestamp, pd.DataFrame] = {}
@@ -297,11 +292,14 @@ def run_backtest(
         is_rebalance = (i % rebalance_every == 0)
 
         if is_rebalance:
-            # 用截至 T 日（不含 T+1，因为信号是 T 收盘后的）的数据
-            target_weights = generate_target_weights(
-                bars, stock_basic, asof,
-                lookback=lookback, skip=skip, top_k=top_k,
-            )
+            if precomputed_target_weights is None:
+                # 用截至 T 日（不含 T+1，因为信号是 T 收盘后的）的数据
+                target_weights = generate_target_weights(
+                    bars, stock_basic, asof,
+                    lookback=lookback, skip=skip, top_k=top_k,
+                )
+            else:
+                target_weights = precomputed_target_weights.get(asof, {})
             # T+1 开盘价 = 下一交易日的 open
             if i + 1 < len(trading_days):
                 t1_date = pd.Timestamp(trading_days.iloc[i + 1])
@@ -319,6 +317,7 @@ def run_backtest(
                     bars_by_date.get(asof, pd.DataFrame()),
                     skip=cfg.factor.skip,
                     all_bars=bars,
+                    asof_date=asof,
                 )
                 pending_orders = {
                     o.code: o for o in _generate_orders(
@@ -334,13 +333,20 @@ def run_backtest(
             portfolio, today_bars,
             skip=cfg.factor.skip,
             all_bars=bars,
+            asof_date=asof,
         )
         portfolio.nav = nav
 
         # 持仓市值：每个持仓用 last-valid-close（P0 §2.1 修）
         gross_pos = 0.0
         for c, shares in portfolio.positions.items():
-            px = _last_valid_close(c, today_bars, all_bars=bars, skip=cfg.factor.skip)
+            px = _last_valid_close(
+                c,
+                today_bars,
+                all_bars=bars,
+                skip=cfg.factor.skip,
+                asof_date=asof,
+            )
             if px is not None and px > 0:
                 gross_pos += shares * px
         nav_records.append({"date": asof, "nav": nav, "cash": portfolio.cash, "position_value": gross_pos})
@@ -369,6 +375,7 @@ def _compute_nav(
     today_bars: pd.DataFrame,
     skip: int = 0,
     all_bars: pd.DataFrame | None = None,
+    asof_date=None,
 ) -> float:
     """T 日 NAV = 现金 + 持仓按估值价计算的总市值。
 
@@ -383,7 +390,13 @@ def _compute_nav(
     cash = portfolio.cash
     pos_value = 0.0
     for code, shares in portfolio.positions.items():
-        px = _last_valid_close(code, today_bars, all_bars=all_bars, skip=skip)
+        px = _last_valid_close(
+            code,
+            today_bars,
+            all_bars=all_bars,
+            skip=skip,
+            asof_date=asof_date,
+        )
         if px is None or px <= 0:
             continue
         pos_value += shares * px
@@ -408,7 +421,10 @@ def _get_close_series_by_code(all_bars: pd.DataFrame) -> dict[str, pd.Series]:
     # 一次性 groupby + 去 NaN
     closes = pd.to_numeric(all_bars[COL_CLOSE], errors="coerce")
     valid = all_bars.assign(_c=closes).dropna(subset=["_c"])
-    by_code = {code: sub.sort_values(COL_DATE)["_c"] for code, sub in valid.groupby(COL_CODE, observed=True)}
+    by_code = {
+        code: sub.sort_values(COL_DATE).set_index(COL_DATE)["_c"]
+        for code, sub in valid.groupby(COL_CODE, observed=True)
+    }
     _last_valid_cache[cache_key] = by_code
     return by_code
 
@@ -418,6 +434,7 @@ def _last_valid_close(
     today_bars: pd.DataFrame,
     all_bars: pd.DataFrame | None = None,
     skip: int = 0,
+    asof_date=None,
 ) -> float | None:
     """取 code 的最后有效 close（用 T-skip 日价，防 look-ahead + 停牌归零）。
 
@@ -437,10 +454,16 @@ def _last_valid_close(
                 pass
         return None
 
+    if asof_date is None and not today_bars.empty and COL_DATE in today_bars.columns:
+        asof_date = pd.to_datetime(today_bars[COL_DATE], errors="coerce").max()
+    if asof_date is None:
+        return None
+
     by_code = _get_close_series_by_code(all_bars)
     s = by_code.get(code)
     if s is None or s.empty:
         return None
+    s = s.loc[s.index <= pd.Timestamp(asof_date)]
     if skip >= len(s):
         return None
     return float(s.iloc[-1 - skip])

@@ -85,10 +85,17 @@ python -m src validate --asof YYYY-MM-DD
 python -m src snapshot-data          # 冻结本地 processed 数据快照
 python -m src snapshot-data --verify data/metadata/data-xxxx.json
 python -m src backtest              # 回测 + 同花顺风格 rich 报告
+python -m src backtest --partitioned --start-date 2024-01-01 --end-date 2026-07-29
 python -m src overfit --split-date YYYY-MM-DD
+python -m src overfit --partitioned --split-date 2025-01-01
 python -m src paper --asof YYYY-MM-DD
 python -m src broker --action {status,emergency-stop,clear-stop}
 ```
+
+`--partitioned` 会用 DuckDB 在 `bars_by_code/` 上计算每个调仓日的历史信号，
+只将最终入选股票的执行列加载到 Pandas；不需要把全市场合成 `bars.parquet`。
+为了先验证运行时间，建议首次使用较短区间；分区回测仍是研究用途，结果不构成策略晋级或交易授权。
+分区数据的质量门、修复和已知限制见 [docs/partitioned_research.md](docs/partitioned_research.md)。
 
 ## 边界
 
