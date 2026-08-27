@@ -1,0 +1,89 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ===== Virtualenv =====
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# ===== IDE =====
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ===== Jupyter =====
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+profile_default/
+ipython_config.py
+
+# ===== Streamlit =====
+.streamlit/secrets.toml
+
+# ===== 测试 / 覆盖率 =====
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.cache
+coverage.xml
+*.cover
+.mypy_cache/
+.ruff_cache/
+
+# ===== 量化项目数据文件（关键）=====
+# raw 和 processed 数据不提交
+data/raw/
+data/processed/
+data/metadata/
+data/missing_raw_partitions.txt
+# 日志与回测中间产物
+logs/
+results/
+# 任何 parquet/csv/h5 数据
+*.parquet
+*.csv
+*.feather
+*.h5
+*.hdf5
+# notebook 输出
+*.html
+
+# ===== Secrets =====
+.env
+.env.local
+*.pem
+*.key
+config/secrets.yaml
+
+# ===== OS =====
+.Trashes
+.Spotlight-V100
+.fseventsd
